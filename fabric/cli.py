@@ -12,6 +12,7 @@ from pathlib import Path
 import typer
 
 from fabric.registry import RegistryError, register as registry_register
+from fabric.sync import SyncError, sync as run_sync
 
 app = typer.Typer(
     no_args_is_help=True,
@@ -51,10 +52,39 @@ def register(
 @app.command()
 def sync(
     project: str = typer.Argument(..., help="Project name or path"),
-    check: bool = typer.Option(False, "--check", help="Exit non-zero on drift; do not write."),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Exit 1 on drift; do not write. Use in CI.",
+    ),
 ) -> None:
-    """Re-render skill templates into the project's .claude/skills/."""
-    _stub("sync")
+    """Re-render skill templates into the project's .claude/skills/.
+
+    Exit codes: 0 clean (or wrote files), 1 drift (--check only),
+    2 error (config invalid, project not found, template missing).
+    """
+    try:
+        result = run_sync(project, check=check)
+    except SyncError as e:
+        typer.echo(f"sync: {e}", err=True)
+        raise typer.Exit(2) from e
+
+    if check:
+        if not result.drift:
+            typer.echo(f"sync: {project} is clean")
+            return
+        for d in result.drift:
+            typer.echo(d.unified_diff(result.project_path))
+        files = ", ".join(d.name for d in result.drift)
+        typer.echo(f"sync: drift detected in {len(result.drift)} skill(s): {files}", err=True)
+        raise typer.Exit(1)
+
+    if result.written:
+        for name in result.written:
+            typer.echo(f"wrote {name}")
+        typer.echo(f"sync: {len(result.written)} skill(s) updated")
+    else:
+        typer.echo(f"sync: {project} already up to date")
 
 
 @app.command()

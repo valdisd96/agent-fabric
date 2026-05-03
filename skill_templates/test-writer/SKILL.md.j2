@@ -1,0 +1,13 @@
+---
+name: test-writer
+description: PLACEHOLDER — real template lands in Phase 0C (#7).
+version: 0.0.1
+---
+
+# test-writer — placeholder
+
+Test command: `{{ build.test_cmd }}`
+
+Modules in scope:
+{% for m in modules %}- `{{ m.path }}` — {{ m.role }}
+{% endfor %}

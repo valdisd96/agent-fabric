@@ -18,13 +18,6 @@ from fabric.registry import (
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-@pytest.fixture
-def isolated_fabric_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    home = tmp_path / "fabric-home"
-    monkeypatch.setenv("FABRIC_HOME", str(home))
-    return home
-
-
 def _make_project(root: Path, fixture: str = "good.yaml") -> Path:
     """Create a fake project at `root` with `.fabric/config.yaml` from fixtures."""
     fabric_dir = root / ".fabric"
