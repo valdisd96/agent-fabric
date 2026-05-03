@@ -21,3 +21,6 @@ logs/
 .DS_Store
 .idea/
 .vscode/
+
+# Claude Code per-user state
+.claude/settings.local.json

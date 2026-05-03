@@ -8,7 +8,30 @@ The first project it manages is [`teach-me-eng-bot`](https://github.com/valdisd9
 
 ## Status
 
-Phase 0 (extract & generalize) — not started. Phases tracked as GitHub issues.
+Phase 0 (extract & generalize) — in progress. Phases tracked as GitHub issues.
+
+## Install (dev)
+
+```bash
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+## CLI
+
+| Command | Phase | Purpose |
+|---|---|---|
+| `fabric register <repo-path>` | 0A | Validate `<path>/.fabric/config.yaml` and add to `~/.fabric/projects.yaml`. |
+| `fabric sync <project> [--check]` | 0B | Re-render skill templates into `<project>/.claude/skills/`. `--check` exits non-zero on drift. |
+| `fabric tick` | 1 | One-shot poll-and-dispatch (debug). |
+| `fabric dispatch <project> <issue> <stage>` | 1 | Force-dispatch a stage. |
+| `fabric status` | 1 | Text dump of the current queue. |
+| `fabric pause [--reason]` / `fabric resume` | 1 | Toggle the global pause flag. |
+| `fabric logs <project> <issue> [--follow]` | 1 | Tail agent logs. |
+
+Phase-1 commands are stubbed (exit code 2) until the scheduler/dispatcher land.
+
+`$FABRIC_HOME` overrides the default registry directory (`~/.fabric`); the systemd unit on the Pi sets it to `/var/lib/fabric`.
 
 ## Roadmap
 

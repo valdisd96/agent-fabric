@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-fabric"
+version = "0.0.1"
+description = "Multi-project agent fabric — drives the plan-exec → test-writer → review-pr Claude pipeline across N repos."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Uladzislau Vauchok" }]
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2.6",
+    "jinja2>=3.1",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+fabric = "fabric.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["fabric"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

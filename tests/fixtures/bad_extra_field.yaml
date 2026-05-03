@@ -1,0 +1,9 @@
+project:
+  name: x
+  repo: owner/repo
+  unexpected_field: oops
+
+build:
+  test_cmd: "pytest"
+
+fabric_version: "0.0.1"
