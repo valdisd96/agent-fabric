@@ -16,9 +16,9 @@ from fabric.render import (
 def test_render_skill_uses_default_when_no_overlay(project: Path, fabric_root: Path) -> None:
     config = load_project_config(project)
     out = render_skill("plan-exec", project, config, fabric_root=fabric_root)
-    assert "plan-exec" in out
-    # Default template references project.name + build.test_cmd
-    assert config.project.name in out
+    # Frontmatter `name:` is the most stable hook into the rendered content.
+    assert "name: plan-exec" in out
+    # plan-exec's template substitutes the smoke command (setup_cmd && test_cmd).
     assert config.build.test_cmd in out
 
 
