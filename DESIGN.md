@@ -1,256 +1,586 @@
-# agent-fabric — design
+# Agent Fabric — Design Plan
 
-A Telegram-controlled Python service that orchestrates autonomous Claude-Code agent pipelines across multiple GitHub repositories.
+A reusable multi-project agent fabric that subsumes the per-repo orchestrator described in [`teach-me-eng-bot/orchestrator-plan.md`](https://github.com/valdisd96/teach-me-eng-bot/blob/main/orchestrator-plan.md). The fabric is a long-running service plus two control surfaces (web dashboard + Telegram bot) that drive the same `plan-exec → test-writer → review-pr` pipeline across N project repos.
 
-Each managed project keeps its own pipeline definition in-repo: a set of `scripts/agent-*.sh` entry points (one per pipeline stage) plus the matching `.claude/skills/`. The fabric is project-agnostic — it polls GitHub for `state:*` label transitions, picks the next eligible issue per project, shells out to the project's mapped script, manages retries and the cycle counter, and pushes the human-gate events (clarifications, decompose approvals, agent failures, cycle-cap hits, auto-merges) to a Telegram bot for one-tap action from your phone.
+This document supersedes [`teach-me-eng-bot/orchestrator-plan.md`](https://github.com/valdisd96/teach-me-eng-bot/blob/main/orchestrator-plan.md) once Phase 1 ships. Decisions inherited from the orchestrator plan are marked **(inherited)** and only re-litigated if the new shape changes them.
 
-The worked example is [`teach-me-eng-bot`](https://github.com/valdisd96/teach-me-eng-bot) — see its `workflow.md` and `orchestrator-plan.md` for the upstream design that this fabric generalises.
+> **Status:** Phase 0 not started. The repo and this design exist; the four phase-tracking issues are filed. Build order is TG-first per the [Phased roadmap](#phased-roadmap) — Phase 1 ships the Telegram bot before the web dashboard (Phase 2). This is a conscious deviation from the original draft of this doc, where Phase 1 was the dashboard.
 
-## Locked decisions
+## Table of contents
 
-| Axis | Choice | Notes |
-|---|---|---|
-| Stack | Python 3.11+, FastAPI, SQLite | Continuity with the bots that the fabric manages. |
-| Control surface | Telegram bot only (v1) | HTMX-driven web dashboard deferred — FastAPI is already there if/when wanted. |
-| Dispatcher | Fabric calls per-project `scripts/agent-*.sh <issue#>` | Each project owns its pipeline. Fabric stays project-agnostic. |
-| State | GitHub = source-of-truth; SQLite = local cache + queue/dispatch/retry log | Cycle counter persists in `<!-- cycle:N -->` HTML comments on the issue (matches teach-me-eng-bot's plan). |
-| Hosting | Same VPS as the bots being managed | One host to maintain auth + secrets. Per-project flock; cross-project parallelism. |
-| Project registration | Central `projects.yaml` on the fabric host | Operator config, hot-reloaded. Project repos stay clean of fabric concerns. |
-| Trigger | Polling, default 60s | Per-project, per-state. Webhooks deferred. |
-| Concurrency | Per-project flock; cross-project parallel | One in-flight stage per project at a time. |
-| Selection | E3: `state:in-review` first, then `priority:*`, then createdAt | Drains in-flight before starting new work. |
-| Failure handling | G2: retry at 60s / 5m / 15m, then `state:blocked` with comment | Surfaces real bugs; tolerates flakes. |
-| Cycle limit | 5 round-trips → `state:blocked` (counter in HTML comment) | Counts both Stage-2 bounces and Stage-3 rejections. |
-| Trust gate | Issue author must be in the project's `trust_authors`; TG sender must be in `ALLOWED_TG_USER_IDS` | Two layers — issue gating + control-surface gating. |
-| Model | All agents on `claude-opus-4-7` | Single model for v1; no mixing. |
+1. [Goals](#goals)
+2. [Non-goals](#non-goals)
+3. [Architecture](#architecture)
+4. [Repo layout](#repo-layout)
+5. [Per-project layout & config](#per-project-layout--config)
+6. [Skill template model](#skill-template-model)
+7. [Decisions](#decisions)
+8. [Phased roadmap](#phased-roadmap)
+9. [Migration from the in-repo orchestrator](#migration-from-the-in-repo-orchestrator)
+10. [Risks & open questions](#risks--open-questions)
+
+---
+
+## Goals
+
+The fabric must:
+
+1. **Drive the pipeline across N projects** (target: 6–8 within 6 months) from one process, one config dir, one set of credentials.
+2. **Surface the queue** so you can see at a glance — on either laptop or phone — what's running, what's waiting, what needs your input.
+3. **Make human gates one-tap.** Approving a PR, answering a clarification, flipping a label, posting a comment — all from the dashboard or Telegram, without `gh` incantations.
+4. **Reuse generic skills** across projects via templates, while letting any project override any skill locally.
+5. **Stay lightweight.** Single-user. SQLite. Run on the Pi. Tailscale for remote access. No Postgres, no message queue, no Kubernetes.
+6. **Be open-source-able later.** Project-specific config is data, not code. Auth abstraction is clean enough to swap PAT for GitHub App.
+
+## Non-goals (v1)
+
+- Multi-tenancy / team auth.
+- Per-stage parallelism within a project.
+- Self-filing issues from the fabric itself (Phase 4 of the orchestrator plan).
+- Replacing GitHub as the source of truth — issues, comments, PRs, labels stay canonical on GH; the fabric mirrors and acts on them.
+- A mobile app — Telegram is the phone surface.
+
+---
 
 ## Architecture
 
+### Overview
+
 ```
-                       ┌──────────────────────────────────────────┐
-                       │          FastAPI app (uvicorn)            │
-                       │                                            │
-   GitHub  ◀── poll ───┤  ┌─────────────────────────────────────┐  │
-   GitHub  ─── push ───┤  │ poller (asyncio task, 60s default)  │  │
-   GitHub  ─── push ───┤  │ for each project, for each state:    │──┼─── shell ───▶  scripts/agent-*.sh
-                       │  │   gh issue list → SQLite runs        │  │                in clone_path
-                       │  │   pick winner per E3                  │  │
-                       │  └──────────────┬──────────────────────┘  │
-                       │                 │                           │
-                       │  ┌──────────────▼──────────────────────┐  │
-                       │  │ dispatcher                           │  │
-                       │  │   per-project asyncio.Lock + flock   │  │
-                       │  │   spawn claude -p via subprocess      │  │
-                       │  │   stream stdout/stderr to logs/<p>/   │  │
-                       │  │   on exit → refresh state from GH     │  │
-                       │  └──────────────┬──────────────────────┘  │
-                       │                 │                           │
-                       │  ┌──────────────▼──────────────────────┐  │
-                       │  │ state (SQLite, WAL)                  │  │
-                       │  │   projects, runs, dispatches,         │  │
-                       │  │   retries, notifications              │  │
-                       │  └──────────────┬──────────────────────┘  │
-                       │                 │                           │
-                       │  ┌──────────────▼──────────────────────┐  │
-   Telegram  ◀────────▶│  │ tg adapter (python-telegram-bot)     │  │
-                       │  │   commands + inline-button alerts    │  │
-                       │  └─────────────────────────────────────┘  │
-                       └──────────────────────────────────────────┘
+                    ┌────────────────────────────────────────────────┐
+                    │              AGENT FABRIC (Pi)                 │
+                    │                                                │
+   laptop ──HTTPS──▶│  ┌──────────────────────────────────────────┐ │
+   (Tailscale)      │  │  FastAPI  ──  REST + WebSocket           │ │
+                    │  │  HTMX dashboard pages                     │ │
+                    │  └──────────────────────────────────────────┘ │
+                    │                     │                          │
+   phone ──Telegram─┼──▶ ┌──────────────┐ │                          │
+                    │    │ Telegram bot │─┤                          │
+                    │    └──────────────┘ │                          │
+                    │                     ▼                          │
+                    │  ┌──────────────────────────────────────────┐ │
+                    │  │  Core service (asyncio)                   │ │
+                    │  │   • Scheduler  (60s tick)                 │ │
+                    │  │   • Dispatcher (subprocess: claude -p)    │ │
+                    │  │   • GitHub client (gh CLI wrapper)        │ │
+                    │  │   • SQLite state                          │ │
+                    │  │   • Project registry                      │ │
+                    │  │   • Skill renderer (Jinja2)               │ │
+                    │  └──────────────────────────────────────────┘ │
+                    │                     │                          │
+                    └─────────────────────┼──────────────────────────┘
+                                          │
+                  ┌──────────────────┬────┴────┬──────────────────┐
+                  ▼                  ▼         ▼                  ▼
+          ┌─────────────┐    ┌─────────────┐  ...        ┌─────────────┐
+          │  project 1  │    │  project 2  │             │  project N  │
+          │  + .fabric/ │    │  + .fabric/ │             │  + .fabric/ │
+          └─────────────┘    └─────────────┘             └─────────────┘
+                  │                  │                          │
+                  └──────────────────┴──────────────────────────┘
+                                     │
+                              ┌──────▼──────┐
+                              │  GitHub API │
+                              └─────────────┘
 ```
 
 ### Components
 
-- **Poller** — async background task. Per project, per watched state: runs `gh issue list --label state:<X> --json number,labels,author,createdAt`. Filters by `trust_authors`. Writes/updates `runs` rows. Picks at most one winner per project per tick using selection rule **E3**.
-- **Dispatcher** — drains the per-project work queue. Per-project `asyncio.Lock` plus an OS-level `flock` on `data/locks/<project>.lock` so that a fabric crash + restart can't double-dispatch. Spawns `claude -p --model claude-opus-4-7 …` via the project's mapped script for the winning issue's state. Streams logs to `logs/<project>/<issue>/<stage>-<ts>.log`. On script exit, refreshes the issue's state from GitHub and writes a `dispatches` row.
-- **State store** — SQLite (WAL mode, `PRAGMA foreign_keys=ON`). The fabric's truth for *its own* operational state (queue, retries, notifications). GitHub remains the truth for issue body / labels / comments — the fabric mirrors what it needs to render queue views fast and to detect transitions.
-- **Telegram adapter** — `python-telegram-bot`. Bot token + allowlist read from env. Commands listed below. Posts inline-button cards to subscribed `notify_telegram_chat_ids` for each project.
-- **Config loader** — reads `projects.yaml` on startup; watches the file with `watchfiles` and hot-reloads on change (logs the diff; refuses reloads that would break the schema).
+**Core service** — single process, asyncio event loop. Hosts everything:
+- **Scheduler** — APScheduler-driven 60s tick. Iterates registered projects, queries GH for actionable issues, picks one per tick (cross-project priority).
+- **Dispatcher** — spawns `claude -p --model claude-opus-4-7 ...` as `asyncio.create_subprocess_exec`. Streams stdout to log file + WebSocket subscribers. Single-flight via `asyncio.Semaphore(1)`.
+- **GitHub client** — thin wrapper around `gh` CLI subprocess (already installed and authed; don't reinvent). Caches repo lookups.
+- **State store** — SQLite at `~/.fabric/state.db`. Schema in [Decision 1](#decision-1--state-storage).
+- **Project registry** — `~/.fabric/projects.yaml`. List of `{name, path, repo}` triples.
+- **Skill renderer** — Jinja2 takes `<fabric>/skill_templates/<name>.md.j2` (overlaid by `<project>/.fabric/skills/<name>.md.j2` if present), renders with project config, writes to `<project>/.claude/skills/<name>.md`.
 
-## Project config (`projects.yaml`)
+**Web dashboard** — HTMX + Tailwind, server-rendered from FastAPI. Pages:
+- `/` — kanban board across all projects (columns = states, swim-lanes = projects)
+- `/p/<project>` — project detail: queue, recent dispatches, agent logs
+- `/p/<project>/i/<issue>` — issue detail: body + comments + plan-exec spec block + linked PR diff link, action panel (approve / request-changes / comment / change label / force-dispatch / block)
+- `/live` — currently-dispatched agent's stdout, tailing
+- `/settings` — pause/resume, project registry, polling interval, quota status
 
-Operator-owned, lives next to the fabric (not in any project repo).
+**Telegram bot** — push-notify + chat-control. Sends a message when an issue enters any human-gate state; inline buttons for the obvious next action. Reply-to-message becomes a GH comment. Slash commands: `/queue`, `/status`, `/pause`, `/resume`, `/projects`.
 
-```yaml
-defaults:
-  cycle_cap: 5
-  poll_interval_seconds: 60
-  retry_backoff_seconds: [60, 300, 900]
-  selection: [in-review, tests-pending, needs-rework, needs-planning]
-
-projects:
-  - name: teach-me-eng-bot
-    repo: valdisd96/teach-me-eng-bot
-    clone_path: /srv/agent-fabric/projects/teach-me-eng-bot
-    trust_authors: [valdisd96]
-    notify_telegram_chat_ids: [12345678]
-    pipeline:
-      - state: needs-planning
-        script: scripts/agent-plan-exec.sh
-      - state: needs-rework
-        script: scripts/agent-plan-exec.sh
-      - state: tests-pending
-        script: scripts/agent-test-write.sh
-      - state: in-review
-        script: scripts/agent-review.sh
-    # Optional pre-stage routes by issue type.
-    pre_stages:
-      - type_label: type:epic
-        script: scripts/agent-epic-decompose.sh
-        states: [needs-planning]
+**CLI** — `fabric` command, mostly for setup and debug:
+```
+fabric register <repo-path>          add a project to the registry
+fabric sync     <project> [--check]  re-render skills from templates
+fabric tick                          one-shot poll-and-dispatch (debug)
+fabric dispatch <project> <issue> <stage>   force-dispatch
+fabric status                        text dump of current queue
+fabric pause / fabric resume         flip the pause flag
+fabric logs     <project> <issue>    tail agent logs
 ```
 
-Adding a new project: `git clone` into `clone_path`, append a block, save. The fabric hot-reloads; new project starts being polled at the next tick.
+---
 
-## Telegram interface
+## Repo layout
 
-### Commands
+The fabric lives in its own repo (working name: `agent-fabric`).
 
-| Command | Effect |
-|---|---|
-| `/queue [project]` | List in-flight + queued runs across all projects, or filtered to one. |
-| `/show <issue-url\|#>` | Print state, last dispatch, retry count, cycle count, latest agent log tail. |
-| `/approve <issue>` | (clarification or decompose-approval issues) Flip the label back to the next workflow state and post `/decompose-ok` if decompose. |
-| `/reject <issue> <reason>` | Post `reason` as an issue comment and flip to `state:blocked`. |
-| `/comment <issue> <text>` | Post `text` as an issue comment as the gh-authenticated user. |
-| `/relabel <issue> <label>` | Set/replace the `state:*` label. |
-| `/retry <issue>` | Force-dispatch the current state's script regardless of cycle counter. Logs the override. |
-| `/pause [project\|all]` | Touch `data/pause/<project>` (or `data/pause/all`); poller skips paused entries. |
-| `/resume [project\|all]` | Remove the touch-file. |
-| `/projects` | List registered projects + their watched states + per-project pause status. |
-| `/help` | Print the command list. |
+```
+agent-fabric/
+├── pyproject.toml
+├── README.md
+├── fabric/
+│   ├── __init__.py
+│   ├── cli.py
+│   ├── server.py             # FastAPI app
+│   ├── scheduler.py          # poll loop
+│   ├── dispatcher.py         # claude -p subprocess
+│   ├── github.py             # gh CLI wrapper
+│   ├── state.py              # SQLite schema + DAO
+│   ├── registry.py           # project registry
+│   ├── render.py             # Jinja2 skill rendering
+│   ├── telegram_bot.py
+│   └── web/
+│       ├── templates/        # Jinja2 HTMX templates
+│       └── static/
+├── skill_templates/
+│   ├── plan-exec.md.j2
+│   ├── test-writer.md.j2
+│   ├── review-pr.md.j2
+│   ├── clarify-issue.md.j2
+│   └── epic-decompose.md.j2
+├── examples/
+│   └── teach-me-eng-bot.config.yaml
+├── scripts/
+│   ├── install-systemd.sh
+│   └── setup-labels.sh       # provisioned per-project, copied from here
+└── tests/
+```
 
-### Inline-button cards
+---
 
-The fabric DMs you with an action card on these triggers (one DM each):
+## Per-project layout & config
 
-- **Clarification posted** by `clarify-issue` → buttons: `Open issue`, `Approve (re-run)`, `Reject`.
-- **Decompose approval needed** (`state:awaiting-decompose-approval`) → buttons: `Open issue`, `/decompose-ok`, `Reject`.
-- **Agent failed after retries** → buttons: `Open log`, `Retry`, `Block`.
-- **Cycle cap hit** → buttons: `Open issue`, `Block`, `Override (+1 cycle)`.
-- **PR auto-merged** → buttons: `Open PR`, `Open commit`. (Informational.)
+Each managed project gets a `.fabric/` directory and (optionally) committed rendered skills.
 
-## SQLite schema (sketch)
+```
+my-project/
+├── ...                              # existing project files
+├── .fabric/
+│   ├── config.yaml                  # required
+│   └── skills/                      # optional per-project overrides
+│       └── review-pr.md.j2          # overlays the fabric default for this skill
+├── .claude/
+│   └── skills/                      # rendered output (committed; see Decision 4)
+│       ├── plan-exec.md
+│       ├── test-writer.md
+│       ├── review-pr.md             # rendered from the project's overlay
+│       ├── clarify-issue.md
+│       └── epic-decompose.md
+```
+
+### `.fabric/config.yaml` schema (sketch)
+
+```yaml
+project:
+  name: teach-me-eng-bot
+  repo: valdisd96/teach-me-eng-bot
+  trusted_authors: [valdisd96]
+
+build:
+  setup_cmd: "source .venv/bin/activate"
+  test_cmd: "python -m pytest -q"
+  lint_cmd: null
+
+modules:
+  - path: bot.py
+    role: "python-telegram-bot wiring + handlers + scheduler bootstrap"
+  - path: vocab.py
+    role: "vocab CRUD, mention scanning, FSRS rating, weighted-random select_word"
+  - path: scheduler.py
+    role: "push planning + APScheduler runner"
+  # ...
+
+safety:
+  blocked_paths:
+    - .github/workflows/**
+    - teach-me-eng-bot.service
+    - install-service.sh
+  destructive_db_patterns:
+    - "DROP COLUMN"
+    - "DROP TABLE"
+    - "ALTER COLUMN .* DROP"
+  notes: |
+    db.py migrations may add columns but never drop. FSRS columns
+    (stability, difficulty, state, step, due, reps, lapses, last_review)
+    are load-bearing and must not be touched.
+
+labels:
+  state_prefix: "state:"
+  type_prefix: "type:"
+  area_prefix: "area:"
+  area_labels: [bot, vocab, scheduler, llm, translator, config, db]
+
+pipeline:
+  cycle_limit: 5
+  retry_count: 3
+  retry_backoff_seconds: [60, 300, 900]
+  daily_dispatch_cap: 30        # quota guard
+
+fabric_version: "0.3.0"          # for sync drift detection
+```
+
+Templates reference these via `{{ build.test_cmd }}`, `{% for m in modules %}{{ m.path }} — {{ m.role }}{% endfor %}`, etc.
+
+---
+
+## Skill template model
+
+### Render flow
+
+1. Fabric reads `<project>/.fabric/config.yaml`.
+2. For each skill template:
+   - If `<project>/.fabric/skills/<name>.md.j2` exists → use it.
+   - Else → use `<fabric>/skill_templates/<name>.md.j2`.
+3. Render with project config as Jinja2 context.
+4. Write to `<project>/.claude/skills/<name>.md`.
+5. The project commits these files. `fabric sync --check` warns if they're stale relative to the templates (drift detection).
+
+### Why render-and-commit, not render-at-dispatch
+
+- Claude Code expects skills at a known path (`.claude/skills/`) — no `--add-dir` magic needed.
+- Committed skills are visible during code review, version-controlled, and diffable.
+- The "double source of truth" (template + rendered) is mitigated by `fabric sync --check` in CI: warn if rendered output doesn't match the template's render.
+- Treat rendered skills as generated artifacts (like `.d.ts` or protoc output) — humans don't edit them; they edit the template or the overlay.
+
+### Override grain
+
+Override at the skill level (whole file), not at the section level. A project that needs to deviate writes its own full template in `.fabric/skills/`. Section-level inheritance gets surprising fast and there's no demand for it yet.
+
+### Drift detection in CI
+
+A simple GitHub Action in each managed project: `fabric sync --check && git diff --exit-code .claude/skills/`. Fails the build if the committed skills don't match what the current fabric version would render. Forces an explicit `fabric sync` commit.
+
+---
+
+## Decisions
+
+### Decision 1 — State storage
+
+| | Approach | Notes |
+|---|---|---|
+| **A1** | SQLite (`~/.fabric/state.db`) **+ HTML comments mirrored to issues** | DB for fast cross-project queries (dashboard); comments for portability + survival of fabric reinstall. |
+| A2 | SQLite only | Loses cycle counters etc. on host migration. |
+| A3 | HTML comments only (current orchestrator plan) | Slow for dashboard rendering; N round-trips per page load. |
+
+**Choice: A1.** SQLite is the working store; the cycle counter is *also* written to the issue HTML comment so a re-installed fabric can recover state from GH.
+
+Schema sketch:
 
 ```sql
 CREATE TABLE projects (
   name TEXT PRIMARY KEY,
-  repo TEXT NOT NULL,
-  clone_path TEXT NOT NULL,
-  config_json TEXT NOT NULL,            -- last-known projects.yaml block
-  paused INTEGER NOT NULL DEFAULT 0,
-  updated_at TEXT NOT NULL
+  path TEXT NOT NULL,         -- absolute path on host
+  repo TEXT NOT NULL,         -- "owner/repo"
+  fabric_version TEXT,
+  registered_at TEXT NOT NULL
 );
 
-CREATE TABLE runs (
-  id INTEGER PRIMARY KEY,
-  project TEXT NOT NULL REFERENCES projects(name) ON DELETE CASCADE,
-  issue_number INTEGER NOT NULL,
-  state_label TEXT NOT NULL,            -- state:* without prefix
-  priority TEXT,                        -- priority:* without prefix
-  type_label TEXT,                      -- type:* without prefix
-  author TEXT NOT NULL,
-  cycle_count INTEGER NOT NULL DEFAULT 0,
-  observed_at TEXT NOT NULL,
-  UNIQUE(project, issue_number)
+CREATE TABLE issues (
+  project TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  state_label TEXT,           -- snapshot from GH
+  type_label TEXT,
+  priority_label TEXT,
+  area_label TEXT,
+  title TEXT,
+  url TEXT,
+  cycle_count INTEGER DEFAULT 0,
+  last_seen_at TEXT,
+  PRIMARY KEY (project, number)
 );
 
 CREATE TABLE dispatches (
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
   project TEXT NOT NULL,
-  issue_number INTEGER NOT NULL,
-  state_label TEXT NOT NULL,            -- state when dispatched
-  script TEXT NOT NULL,                 -- path that ran
+  issue INTEGER NOT NULL,
+  stage TEXT NOT NULL,        -- plan-exec | test-writer | review-pr | epic-decompose
   started_at TEXT NOT NULL,
-  finished_at TEXT,
+  ended_at TEXT,
   exit_code INTEGER,
-  log_path TEXT NOT NULL,
-  outcome TEXT                          -- 'completed' | 'retry' | 'blocked'
-);
-
-CREATE TABLE retries (
-  dispatch_id INTEGER PRIMARY KEY REFERENCES dispatches(id) ON DELETE CASCADE,
-  attempt INTEGER NOT NULL,             -- 1, 2, 3
-  scheduled_for TEXT NOT NULL
+  log_path TEXT,
+  triggered_by TEXT           -- "scheduler" | "manual:<surface>"
 );
 
 CREATE TABLE notifications (
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,         -- clarification | decompose-approval | blocked | dispatch-failed
   project TEXT NOT NULL,
-  issue_number INTEGER,
-  kind TEXT NOT NULL,                   -- 'clarification' | 'decompose_approval' | 'agent_failed' | 'cycle_cap' | 'auto_merge'
-  tg_chat_id INTEGER NOT NULL,
-  tg_message_id INTEGER NOT NULL,
-  sent_at TEXT NOT NULL
+  issue INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  delivered_to TEXT,          -- comma list of surfaces
+  acknowledged_at TEXT
 );
+
+CREATE TABLE quota_log (
+  project TEXT NOT NULL,
+  day TEXT NOT NULL,          -- YYYY-MM-DD UTC
+  dispatches INTEGER DEFAULT 0,
+  PRIMARY KEY (project, day)
+);
+
+CREATE TABLE settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+-- e.g. ('paused', '0'), ('paused_reason', '...')
 ```
 
-Forward-only column migrations applied at startup.
+### Decision 2 — Process model
 
-## Failure handling
+| | Approach | Pros | Cons |
+|---|---|---|---|
+| B1 | bash + tmux (orchestrator plan) | Simple. | Hard to expose REST + WS. |
+| **B2** | **Single asyncio Python process under systemd** | One process owns scheduler + API + WS + Telegram. Easy state sharing. | Restart blips kill in-flight dispatches. |
+| B3 | Multi-process (scheduler + API + Telegram separate) | Crash isolation. | IPC/coordination complexity. SQLite locking gotchas. |
 
-- Script exits 0 → mark dispatch `completed`, refresh state from GitHub, idle until next tick.
-- Script exits non-zero → schedule retry attempt 1 (60s), 2 (5m), 3 (15m). After attempt 3, post issue comment `agent-fabric: <stage> failed 3× — exit=<code>, log=<url>` and flip to `state:blocked`.
-- Script timeout (default 30 min, per-stage overridable) → terminate the subprocess group, mark exit code as `-1` for retry purposes.
-- Cycle counter at `state:needs-rework` reaches `cycle_cap` → flip to `state:blocked` with a comment listing prior PR URLs (read from issue timeline). No retry.
-- Fabric crash mid-dispatch → on restart, dispatches without `finished_at` for >2× their stage's typical duration are marked `outcome='abandoned'`; the issue is re-eligible at next tick (state on GitHub is unchanged because the agent script is responsible for label transitions).
+**Choice: B2.** With single-flight concurrency and short dispatch frequencies (~minutes per stage), restart blips are tolerable. SQLite is happy with one writer. The simplification of "one process, one log, one PID to manage" outweighs crash isolation for a single-user fabric.
 
-## Hosting / deployment
+Subprocess for the actual `claude -p` agent dispatch — that's expected to be long-running (minutes), so it has to be out-of-process. Streamed stdout goes to log file + WebSocket fanout.
 
-Target host: same VPS as `teach-me-eng-bot`.
+### Decision 3 — Concurrency & queue model
 
-Required:
-- `git`, `gh` (with PAT, `repo` scope), `claude` CLI (Pro/Max OAuth, one-time browser login), `python3.11+`.
-- Repo cloned to `/srv/agent-fabric`, `.venv` activated, requirements installed.
-- `.env` populated:
-  - `AGENT_FABRIC_TG_TOKEN` — bot token from BotFather (separate bot from the eng-bot)
-  - `ALLOWED_TG_USER_IDS` — comma-separated TG user IDs allowed to issue commands
-  - `GH_TOKEN` — same scope as `gh auth login` (or rely on `gh` CLI session)
-- `projects.yaml` populated; one `git clone` per project at the listed `clone_path`.
-- systemd unit installed:
+| | Model | v1 |
+|---|---|---|
+| **C1** | **Global single-flight; per-project queues feed it** | ✓ |
+| C2 | Per-project parallelism (1 stage per project, N projects in parallel) | Phase 3 |
+| C3 | Per-stage parallelism (1 plan-exec, 1 test-writer, 1 review-pr concurrent) | Phase 3 |
+
+**Choice: C1.** Single global semaphore, takes work from a cross-project priority queue (see Decision 4). Quota considerations alone (Pro/Max session limits) push toward serialization with 6–8 projects.
+
+### Decision 4 — Cross-project selection
+
+When multiple projects have actionable work this tick, who goes first?
+
+| | Algorithm | Behaviour |
+|---|---|---|
+| D1 | Per-project round-robin within state priority | Fair; no project starves. |
+| D2 | Pure cross-project priority (any project's `priority:high in-review` beats any project's `priority:medium`) | Urgent stuff jumps repos. |
+| **D3** | **Hybrid: state priority first (in-review > rework > tests-pending > needs-planning), then `priority:*` across projects, then round-robin between projects at same level, then createdAt** | Drains in-flight; respects priority; no starvation. |
+
+**Choice: D3.** Same spirit as the in-repo plan's E3, generalized across projects. Round-robin tiebreak ensures one chatty project can't monopolise the fabric.
+
+### Decision 5 — API surface
+
+REST + WebSocket from the same FastAPI app.
+
+```
+GET    /api/projects                 list registered projects
+GET    /api/projects/{p}/issues      queue for a project (cached from last poll)
+GET    /api/issues                   global queue
+GET    /api/issues/{p}/{n}           issue detail (body, comments, latest plan, PR url)
+POST   /api/issues/{p}/{n}/comment   {body} — posts as you, via gh
+POST   /api/issues/{p}/{n}/label     {add: [...], remove: [...]}
+POST   /api/issues/{p}/{n}/dispatch  {stage} — force-dispatch
+POST   /api/prs/{p}/{n}/review       {action: approve|request-changes|comment, body}
+POST   /api/prs/{p}/{n}/merge        squash + delete branch
+GET    /api/dispatches?project=...   recent dispatch log
+GET    /api/dispatches/{id}/log      tail logs (or WS)
+POST   /api/pause                    {reason}
+POST   /api/resume
+
+WS     /ws/live                      stream of: dispatch_started, dispatch_stdout,
+                                     dispatch_ended, queue_changed, notification_created
+```
+
+The dashboard and Telegram bot both consume this. Shared schemas (Pydantic models) live in `fabric/api_models.py`.
+
+### Decision 6 — Web dashboard tech
+
+| | Stack | Pros | Cons |
+|---|---|---|---|
+| E1 | SvelteKit / React SPA | Rich UX. | Build pipeline. Two languages. JWT plumbing. |
+| **E2** | **HTMX + Tailwind + FastAPI Jinja2** | Server-rendered. No build step. Python-end-to-end. WebSocket integrates cleanly via `hx-ws`. | Less slick UX than SPA — fine for a single-user dev tool. |
+| E3 | Pure HTML, full reload | Painful for live updates. | — |
+
+**Choice: E2.** The dashboard is a control panel for one person; HTMX handles "kanban with live updates" cleanly without a build step. Switch to SvelteKit later if you ever build a public version.
+
+### Decision 7 — Telegram bot scope
+
+Push notifications for human-gate states + quick actions:
+
+| Notification trigger | Buttons |
+|---|---|
+| Issue → `state:clarification-needed` | `Open in dashboard` `Mute issue` (reply to compose answer) |
+| Issue → `state:awaiting-decompose-approval` | `Approve` `Reject` `Open` |
+| Issue → `state:blocked` | `Open` `Mute` |
+| PR opened by fabric | `Approve` `Request changes` `Open` |
+| Dispatch failed (after retries) | `Retry` `Block` `Open` |
+| Daily quota at 80% | `Pause project X` `Open settings` |
+
+Slash commands:
+- `/queue` — text-render of cross-project queue
+- `/status` — what's running, last dispatch, paused?
+- `/pause [reason]` / `/resume`
+- `/projects` — list registered projects
+- `/issue <project> <n>` — quick view
+
+Inline reply: replying to a notification message that's tied to an issue posts the reply as a GH comment on that issue (and, for `clarification-needed`, flips the label to resume the pipeline — "/resume magic" promoted from the orchestrator plan's K3 to v1, since Telegram makes it natural).
+
+### Decision 8 — Auth
+
+| | Approach | v1 | v2 (open source) |
+|---|---|---|---|
+| F1 | One PAT with `repo` scope across all repos | ✓ | — |
+| F2 | GitHub App, installed per-repo | — | ✓ |
+
+**Choice: F1 for v1, F2 when open-sourcing.** PAT keeps setup zero-touch for a single user. GitHub App becomes worthwhile when (a) you want to share the fabric and not hand out PATs, (b) you want webhooks (Decision 9), or (c) you want fine-grained permissions per repo.
+
+Dashboard auth: HTTP basic auth over Tailscale-only HTTPS. JWT/OAuth is overkill for one user on a private network. **Never expose the dashboard to the public internet** — see Risks.
+
+Telegram auth: bot only responds to a single hardcoded `chat_id` (yours). Anyone else gets ignored.
+
+### Decision 9 — Trigger: polling vs webhooks
+
+| | Approach | Phase |
+|---|---|---|
+| G1 | Polling, 60s | v1 (inherited) |
+| G2 | GH webhooks → fabric `/webhook` endpoint | v3 |
+
+**Choice: polling in v1.** Webhooks become attractive once the dashboard URL is stable on Tailscale and you've installed a GitHub App for auth — at that point, the marginal cost is one endpoint and a HMAC check, in exchange for sub-second latency on label flips. Defer until polling latency actually annoys you.
+
+### Decision 10 — Quotas & throttling
+
+With 6–8 projects, Claude Pro/Max session quotas become a real constraint. The fabric tracks per-project dispatch counts in `quota_log` and:
+
+- **Per-project daily cap** — `pipeline.daily_dispatch_cap` in config. Default 30/day. Once hit, the project is skipped until UTC rollover; banner shown in dashboard; Telegram notification at 80%.
+- **Global pause-on-quota-warning** — optional. If you've burned, say, 80% of weekly budget across all projects, fabric auto-pauses with a Telegram notice. (Manual estimate v1; no API to query Anthropic budget directly.)
+- **Sonnet downgrade** — config flag per project: `pipeline.downgrade_low_priority: true` makes `priority:low` issues dispatch with `--model claude-sonnet-4-6`. Off by default.
+
+### Decision 11 — Pause / resume
+
+Three layers:
+
+| Layer | Use case |
+|---|---|
+| **DB flag** (`settings.paused = '1'`) | Normal pause from dashboard / Telegram / CLI |
+| **Per-project pause** (`projects.paused`) | Pause one project, leave others running |
+| **Touch-file** (`~/.fabric/PAUSED`) | Hard escape hatch when the fabric itself is misbehaving and you can't reach the API |
+
+Scheduler checks all three each tick. Pause is graceful — in-flight dispatch finishes; next tick is a no-op until resumed.
+
+### Decision 12 — Failure handling
+
+Inherited from orchestrator plan G2: 3 retries with backoff (60s, 5min, 15min), then park to `state:blocked` with a comment listing exit code + log path. Difference from the bash version: the comment is composed by the fabric (one place to update wording) and a Telegram notification fires at the park.
+
+### Decision 13 — Deployment
+
+Single systemd unit on the Pi:
 
 ```ini
-[Unit]   Description=agent-fabric orchestrator
-[Service] Type=simple
-          ExecStart=/srv/agent-fabric/.venv/bin/uvicorn agent_fabric.main:app --host 127.0.0.1 --port 8090
-          Restart=always
-          User=agent-fabric
-          WorkingDirectory=/srv/agent-fabric
-          EnvironmentFile=/srv/agent-fabric/.env
-[Install] WantedBy=multi-user.target
+[Unit]
+Description=Agent Fabric
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/srv/agent-fabric/.venv/bin/python -m fabric.server
+Restart=always
+RestartSec=5
+User=fabric
+WorkingDirectory=/srv/agent-fabric
+Environment="FABRIC_HOME=/var/lib/fabric"
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-Logs:
-- journald (`journalctl -u agent-fabric -f`)
-- `logs/fabric.log` (rotated 5 MB × 5)
-- `logs/<project>/<issue>/<stage>-<ts>.log` for each agent dispatch
+Tailscale provides the network — both dashboard (HTTPS via `tailscale serve`) and the fabric's outbound `gh`/`claude` calls share the host's network namespace. No port-forwarding to the public internet.
 
-## v1 scope (filed as GitHub issues)
+### Decision 14 — CLI modes
 
-1. **Skeleton** — FastAPI app, SQLite schema + migrations, `projects.yaml` loader with hot-reload, healthcheck, settings via env.
-2. **Poller** — async loop, per-project per-state `gh issue list`, E3 selection, writes `runs`. Honours per-project pause touch-files.
-3. **Dispatcher** — per-project async lock + flock, spawn `claude -p` via mapped script, log streaming, dispatch + retry rows.
-4. **Cycle counter + retry policy** — `<!-- cycle:N -->` HTML comments, G2 retry backoff, `state:blocked` flip with comment on cap or final failure.
-5. **Telegram adapter** — bot, allowlist, all commands and inline-button alert cards.
-6. **Notifications** — wire the five trigger kinds to TG cards; ensure exactly-one delivery per event using the `notifications` table.
-7. **systemd unit + log rotation** — service file, log handler config, install instructions in `README.md`.
-8. **Smoke playbook** — register `teach-me-eng-bot`, file a tiny test issue (e.g. "add an empty test file"), watch one full cycle (plan-exec → test-writer → review-pr → merge) land via TG. Document gotchas.
+| Mode | Purpose |
+|---|---|
+| `fabric server` | Default — long-running service (what systemd runs) |
+| `fabric tick` | One-shot tick, exits. Dry-run mode by default unless `--apply`. |
+| `fabric register <path>` | Add project; validates `.fabric/config.yaml`; renders skills. |
+| `fabric sync <project> [--check]` | Re-render skills; `--check` exits non-zero if drift. |
+| `fabric dispatch <project> <issue> <stage>` | Force-dispatch, ignoring labels. |
+| `fabric status` | Text dump (good for SSH-only sessions). |
+| `fabric pause [reason]` / `fabric resume` | Toggle pause flag. |
+| `fabric logs <project> <issue> [--follow]` | Tail agent logs. |
 
-Each ticket is sized to be one PR. Built in order — later tickets depend on earlier ones.
+---
 
-## Deferred to v2
+## Phased roadmap
 
-- Per-issue worktrees (Archon-style) for parallelism *inside* a single project.
-- Web dashboard (FastAPI + HTMX) for desktop browser control.
-- `.fabric.yaml` self-service onboarding (project-declares-itself).
-- Multi-user TG auth (per-project ACLs instead of global allowlist).
-- Slack / Discord adapters.
-- `--replay <project> <issue> <stage>` mode.
-- Daily throttle / quota-aware pause.
-- Self-filing agent issues (file new bug issues from observed failures).
-- Webhook-driven trigger (only if 60s polling feels slow).
+**Phase 0 — extract & generalize (1–2 weeks)**
+- New `agent-fabric` repo.
+- Move agent scripts from `teach-me-eng-bot/scripts/` and convert to Python.
+- Define `.fabric/config.yaml` schema.
+- Build skill renderer + `fabric sync` + `fabric register`.
+- Migrate teach-me-eng-bot to consume the fabric. Verify parity by running stages manually.
+- Old `scripts/agent-*.sh` left in place as fallback during cutover.
 
-## References
+**Phase 1 — service + Telegram bot (2 weeks)**
+- FastAPI scaffold (no UI yet — the API surface from [Decision 5](#decision-5--api-surface) is built but only the Telegram bot and CLI consume it in this phase).
+- SQLite schema, scheduler tick loop, single-flight dispatcher, retries, cycle counter, quota tracking.
+- python-telegram-bot wiring, single-chat auth.
+- Notifications for all human-gate states (clarification, decompose-approval, blocked, dispatch-failed, quota warning).
+- Inline buttons → API calls.
+- Reply-to-message → GH comment (+ label flip on `clarification-needed`).
+- Slash commands (`/queue`, `/status`, `/pause`, `/resume`, `/projects`, `/issue`).
+- systemd unit on Pi behind Tailscale. Cut over from the (unbuilt) in-repo bash daemon.
 
-- [`teach-me-eng-bot/workflow.md`](https://github.com/valdisd96/teach-me-eng-bot/blob/main/workflow.md) — the canonical example pipeline this fabric orchestrates.
-- [`teach-me-eng-bot/orchestrator-plan.md`](https://github.com/valdisd96/teach-me-eng-bot/blob/main/orchestrator-plan.md) — single-project precursor to the design above.
-- [Archon](https://github.com/coleam00/Archon) — TS/Bun workflow engine that informed the multi-platform-ingress and worktree-per-run ideas. The fabric deliberately skips Archon's YAML DAG engine; the pipeline is a fixed shape per project.
+**Phase 2 — web dashboard (2 weeks)**
+- HTMX + Tailwind pages: kanban, project, issue, live, settings.
+- HTTP basic auth + Tailscale-only ingress (never public internet).
+- WebSocket fanout for live dispatches (`/ws/live`).
+- Action audit log on destructive endpoints.
+- Surfaces every Telegram action plus richer cross-project views.
+
+**Phase 3 — multi-project hardening (after a few weeks of running)**
+- Add 2–3 more real projects. Iterate on config schema based on what doesn't fit.
+- Cross-project quota guard.
+- Webhook receiver (replace polling).
+- GitHub App auth.
+- `fabric sync --check` GH Action template.
+
+**Phase 4 — open-source prep (when stable)**
+- Docs, install script, example project config.
+- Strip personal config (chat_id, repo names) from defaults.
+- License (MIT or Apache-2.0).
+- Public repo.
+
+---
+
+## Migration from the in-repo orchestrator
+
+The current plan in `orchestrator-plan.md` was never fully built (only the agent scripts and skills exist). Migration is mostly "skip the bash daemon, build the Python service instead":
+
+1. Phase 0 of the fabric replaces orchestrator-plan.md decisions wholesale.
+2. The agent scripts (`scripts/agent-*.sh`) become Python functions in `fabric/dispatcher.py` calling `claude -p` directly. They stay on disk during transition as a manual fallback.
+3. The skills under `.claude/skills/` are kept as-is in teach-me-eng-bot for one cycle, then converted to templates in the fabric repo and re-rendered into teach-me-eng-bot's `.claude/skills/` from there.
+4. `scripts/setup-labels.sh` moves to the fabric and is invoked via `fabric register`.
+5. `orchestrator-plan.md` is marked superseded once Phase 1 ships; deleted once Phase 2 ships.
+
+---
+
+## Risks & open questions
+
+### Risks
+
+1. **Dashboard-as-RCE.** The dashboard can dispatch agents, merge PRs, and edit labels across N repos. If exposed beyond Tailscale or auth fails, it's effectively a remote-code-execution surface. Mitigations: Tailscale-only, basic auth, action audit log in DB, rate limit on destructive endpoints.
+2. **Single point of failure.** Fabric crashes → no project ships. Mitigations: systemd restart, SQLite state survives restart, health endpoint pinged by external uptime monitor.
+3. **Skill-template drift across projects.** Updating a template ripples to all 6–8 projects. A bad template change ships bad PRs everywhere. Mitigations: `fabric sync --dry-run` shows diff per project; `fabric_version` in config pins compatibility; CI drift check fails the build on stale skills.
+4. **Quota explosion.** 6–8 projects × pipeline activity can burn weekly Pro/Max budget faster than you notice. Mitigations: per-project daily cap, Telegram alert at 80% of cap, optional Sonnet downgrade for low-priority work.
+5. **In-flight dispatch lost on restart.** Fabric restart kills the running `claude -p` subprocess. The issue stays at whatever label it was at; next tick may re-dispatch. Tolerable — agents are mostly idempotent (cycle counter prevents thrashing) but worth tracking.
+6. **GH PAT scope.** A single PAT with `repo` across 6–8 repos is a juicy credential. v2 GitHub App reduces blast radius.
+
+### Open questions
+
+1. **Skill genericization depth.** How parameterized do templates need to be? Modules + safety paths + test command get you most of the way. Are there project-specific *judgments* (like "FSRS columns are sacred") that resist templating and just need a free-text `notes` field the skill prompt embeds verbatim?
+2. **Should the fabric clone projects itself, or assume they're already cloned at a known path?** v1 plan: assume cloned; `fabric register <path>` just records the path. v2 could `git clone` from `repo` if `path` doesn't exist.
+3. **Dashboard live diff view of agent stdout — useful or noise?** Tailing agent logs while a stage runs is satisfying but probably useless 95% of the time. Build it minimally; expand if you find yourself wanting more.
+4. **One Telegram bot or one per project?** One bot, threaded by project (each notification message tags `[project-name]`). Multi-bot = multi-token = multi-account hassle.
+5. **Cycle counter — do we still mirror to HTML comment or drop it once SQLite is the source of truth?** Mirror in v1 for portability (host migration without state-loss); reconsider when stable.
+6. **Webhook receiver: where does it live?** Same FastAPI app as dashboard, on a `/webhook` route with HMAC verification. Tailscale Funnel for the public ingress (the only public surface), or skip and rely on polling — which is what v1 does.
+7. **`fabric_version` semantics.** When the fabric bumps a template, does it auto-PR the re-render to each project? Or just warn? v1: warn via `fabric sync --check` in CI. Auto-PR is a Phase 3 thought.
+8. ~~**Naming.**~~ **Resolved: `agent-fabric`** — repo at https://github.com/valdisd96/agent-fabric.
