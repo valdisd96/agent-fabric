@@ -1,0 +1,13 @@
+---
+name: review-pr
+description: PLACEHOLDER — real template lands in Phase 0C (#7).
+version: 0.0.1
+---
+
+# review-pr — placeholder
+
+State labels are prefixed `{{ labels.state_prefix }}`.
+
+Blocked paths (must not be modified):
+{% for p in safety.blocked_paths %}- `{{ p }}`
+{% endfor %}
