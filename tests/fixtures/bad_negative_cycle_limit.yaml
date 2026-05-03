@@ -1,0 +1,11 @@
+project:
+  name: x
+  repo: owner/repo
+
+build:
+  test_cmd: "pytest"
+
+pipeline:
+  cycle_limit: 0
+
+fabric_version: "0.0.1"

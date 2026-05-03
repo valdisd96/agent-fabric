@@ -1,0 +1,36 @@
+project:
+  name: teach-me-eng-bot
+  repo: valdisd96/teach-me-eng-bot
+  trusted_authors: [valdisd96]
+
+build:
+  setup_cmd: "source .venv/bin/activate"
+  test_cmd: "python -m pytest -q"
+
+modules:
+  - path: bot.py
+    role: "python-telegram-bot wiring"
+  - path: vocab.py
+    role: "vocab CRUD"
+
+safety:
+  blocked_paths:
+    - .github/workflows/**
+  destructive_db_patterns:
+    - "DROP COLUMN"
+  notes: |
+    FSRS columns are load-bearing.
+
+labels:
+  state_prefix: "state:"
+  type_prefix: "type:"
+  area_prefix: "area:"
+  area_labels: [bot, vocab]
+
+pipeline:
+  cycle_limit: 5
+  retry_count: 3
+  retry_backoff_seconds: [60, 300, 900]
+  daily_dispatch_cap: 30
+
+fabric_version: "0.0.1"

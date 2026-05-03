@@ -1,0 +1,8 @@
+project:
+  name: x
+  repo: owner/repo
+
+build:
+  setup_cmd: ":"
+
+fabric_version: "0.0.1"
