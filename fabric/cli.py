@@ -296,6 +296,15 @@ def setup_labels(
     typer.echo(f"  ({len(diff.unchanged)} unchanged)")
 
     if check:
+        if diff.to_create or diff.to_update:
+            typer.echo(
+                f"setup-labels: drift detected — "
+                f"{len(diff.to_create)} to create, "
+                f"{len(diff.to_update)} to update",
+                err=True,
+            )
+            raise typer.Exit(1)
+        typer.echo(f"setup-labels: {project} labels are clean")
         return
 
     try:
