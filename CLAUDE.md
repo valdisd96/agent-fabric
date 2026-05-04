@@ -28,8 +28,9 @@ Conceptually identical to SCSS → CSS or `protoc` output: humans edit the sourc
 
 ```
 fabric/
-├── cli.py           # typer app — register, sync (real); tick/dispatch/status/pause/resume/logs (Phase 1 stubs)
+├── cli.py           # typer app — register, sync, dispatch (real); tick/status/pause/resume/logs (still stubs)
 ├── config.py        # pydantic v2 models for .fabric/config.yaml + load_config (strict, extra="forbid")
+├── dispatcher.py    # async single-flight `claude -p` runner — semaphore, log streaming, pubsub, cycle counter
 ├── registry.py      # ~/.fabric/projects.yaml reader/writer + register(repo_path)
 ├── github.py        # `gh` CLI wrapper — sync, injectable subprocess runner, pydantic models with camelCase aliases
 ├── render.py        # Jinja2 env (StrictUndefined, keep_trailing_newline=True), overlay resolution, render_skill
@@ -51,6 +52,7 @@ tests/
 ├── test_cli_sync.py   # typer CliRunner end-to-end
 ├── test_state.py      # SQLite schema, migrations, DAO, FK cascade
 ├── test_github.py     # gh CLI wrapper — argv, JSON parsing, set_html_comment idempotency
+├── test_dispatcher.py # claude -p subprocess, log streaming, single-flight, cycle counter, downgrade rules
 └── test_parity.py     # byte-for-byte gate against teach-me-eng-bot (see below)
 ```
 
@@ -82,8 +84,8 @@ python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # tests
-pytest -q                                                    # 96 tests, parity skipped
-TEACH_ME_ENG_BOT_PATH=/path/to/teach-me-eng-bot pytest -q    # 101 tests, parity active
+pytest -q                                                    # 112 tests, parity skipped
+TEACH_ME_ENG_BOT_PATH=/path/to/teach-me-eng-bot pytest -q    # 117 tests, parity active
 
 # CLI smoke
 fabric --help
@@ -103,7 +105,7 @@ fabric sync teach-me-eng-bot --check               # exit 0 / "is clean"
 - **Phase 2 — web dashboard.** HTMX kanban + action panel.
 - **Phase 3+** — multi-project hardening, GitHub App auth, webhook receiver.
 
-Phase-1 CLI commands today are real-but-stubbed: they exit code 2 with "not implemented in phase 0". This is deliberate — the surface is discoverable and accidental invocations fail loudly.
+Phase-1 CLI commands today are mixed: `dispatch` is real (1C); `tick`, `status`, `pause`, `resume`, `logs` still exit code 2 with "not implemented in phase 0". This is deliberate — the surface is discoverable and accidental invocations fail loudly.
 
 ## What's deliberately not parameterized yet
 

@@ -68,6 +68,7 @@ class Pipeline(_Strict):
     retry_count: int = Field(default=3, ge=0)
     retry_backoff_seconds: list[int] = Field(default_factory=lambda: [60, 300, 900])
     daily_dispatch_cap: int = Field(default=30, gt=0)
+    downgrade_low_priority: bool = False
 
     @field_validator("retry_backoff_seconds")
     @classmethod
