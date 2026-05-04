@@ -31,6 +31,7 @@ fabric/
 ├── cli.py           # typer app — register, sync (real); tick/dispatch/status/pause/resume/logs (Phase 1 stubs)
 ├── config.py        # pydantic v2 models for .fabric/config.yaml + load_config (strict, extra="forbid")
 ├── registry.py      # ~/.fabric/projects.yaml reader/writer + register(repo_path)
+├── github.py        # `gh` CLI wrapper — sync, injectable subprocess runner, pydantic models with camelCase aliases
 ├── render.py        # Jinja2 env (StrictUndefined, keep_trailing_newline=True), overlay resolution, render_skill
 ├── state.py         # SQLite DAO at $FABRIC_HOME/state.db — schema_version + Decision-1 tables, forward-only migrations
 ├── sync.py          # iterates SKILL_NAMES, writes or --checks, SyncResult+SkillDrift with unified diffs
@@ -49,6 +50,7 @@ tests/
 ├── test_sync.py       # write, idempotent, --check exit codes
 ├── test_cli_sync.py   # typer CliRunner end-to-end
 ├── test_state.py      # SQLite schema, migrations, DAO, FK cascade
+├── test_github.py     # gh CLI wrapper — argv, JSON parsing, set_html_comment idempotency
 └── test_parity.py     # byte-for-byte gate against teach-me-eng-bot (see below)
 ```
 
@@ -80,8 +82,8 @@ python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # tests
-pytest -q                                                    # 71 tests, parity skipped
-TEACH_ME_ENG_BOT_PATH=/path/to/teach-me-eng-bot pytest -q    # 76 tests, parity active
+pytest -q                                                    # 96 tests, parity skipped
+TEACH_ME_ENG_BOT_PATH=/path/to/teach-me-eng-bot pytest -q    # 101 tests, parity active
 
 # CLI smoke
 fabric --help
