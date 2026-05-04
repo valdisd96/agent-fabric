@@ -136,6 +136,15 @@ def _wire_routes(
     gh_runner: gh.SubprocessRunner,
 ) -> None:
 
+    # ---- liveness ----
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, bool | str]:
+        """Liveness probe — never touches state.db / gh / claude.
+        Reverse proxies and uptime monitors hit this hot, so keep it
+        synchronous and dependency-free."""
+        return {"ok": True}
+
     # ---- read paths ----
 
     @app.get("/api/projects", response_model=list[am.ProjectOut])

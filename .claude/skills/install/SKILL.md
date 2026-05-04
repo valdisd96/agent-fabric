@@ -328,6 +328,14 @@ sudo journalctl -u fabric -f                       # service stdout/stderr
 sudo ls /var/lib/fabric/logs/                      # per-dispatch claude -p logs
 sudo -u fabric /srv/agent-fabric/.venv/bin/fabric logs <project> <n> --follow
 
+# REST surface (all behind /api/* except liveness; OpenAPI at /docs)
+curl -sS http://127.0.0.1:7878/healthz             # {"ok": true}
+curl -sS http://127.0.0.1:7878/api/status          # paused flag + counters
+curl -sS http://127.0.0.1:7878/api/projects        # registered projects
+curl -sS http://127.0.0.1:7878/api/issues          # all tracked issues
+curl -sS http://127.0.0.1:7878/api/dispatches      # recent dispatches
+curl -sS http://127.0.0.1:7878/docs                # interactive OpenAPI UI
+
 # State (read-only is safe while running)
 sudo -u fabric sqlite3 -readonly /var/lib/fabric/state.db '.tables'
 
