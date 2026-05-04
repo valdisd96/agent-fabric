@@ -12,7 +12,12 @@ from pathlib import Path
 
 import typer
 
-from fabric.registry import RegistryError, register as registry_register
+from fabric.registry import (
+    RegistryError,
+    register as registry_register,
+    registry_path,
+    warn_if_systemd_env_diverges,
+)
 from fabric.sync import SyncError, sync as run_sync
 
 app = typer.Typer(
@@ -20,6 +25,14 @@ app = typer.Typer(
     add_completion=False,
     help="Multi-project agent fabric CLI.",
 )
+
+
+@app.callback()
+def _root_callback() -> None:
+    """Surface FABRIC_HOME mismatches between this shell and the systemd
+    unit at /etc/fabric/env — otherwise the CLI silently writes to a path
+    the running service does not read."""
+    warn_if_systemd_env_diverges()
 
 _NOT_IMPLEMENTED_EXIT = 2
 
@@ -48,6 +61,7 @@ def register(
         raise typer.Exit(1) from e
     verb = "updated" if result.replaced else "registered"
     typer.echo(f"{verb} {result.entry.name} -> {result.entry.path} ({result.entry.repo})")
+    typer.echo(f"registry: {registry_path()}")
 
 
 @app.command()

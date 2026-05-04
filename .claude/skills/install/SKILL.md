@@ -229,9 +229,17 @@ sudo install -d -o fabric -g fabric -m 0750 /srv/projects
 
 Then clone, configure, register, label, and sync — all as `fabric`:
 
+**Critical:** `sudo -u` does *not* load `/etc/fabric/env`, so `FABRIC_HOME`
+is unset by default and the CLI falls back to `~/.fabric/projects.yaml`
+— a path the systemd service does not read. Export it explicitly inside
+every `sudo -u fabric` block. As of fabric 0.1.x, `fabric` itself emits
+a stderr warning when this divergence is detected, so you'll notice
+quickly if the export is missed.
+
 ```bash
 sudo -u fabric -H bash <<'EOF'
 set -euo pipefail
+export FABRIC_HOME=/var/lib/fabric        # ← MUST match /etc/fabric/env
 cd /srv/projects
 git clone https://github.com/<owner>/<repo>
 PROJECT=/srv/projects/<repo>
@@ -243,7 +251,7 @@ cp /srv/agent-fabric/examples/teach-me-eng-bot.config.yaml \
    "$PROJECT/.fabric/config.yaml"
 
 FABRIC=/srv/agent-fabric/.venv/bin/fabric
-"$FABRIC" register "$PROJECT"
+"$FABRIC" register "$PROJECT"                     # prints registry path
 "$FABRIC" setup-labels <project-name> --check     # diff against repo
 "$FABRIC" setup-labels <project-name>             # apply
 "$FABRIC" sync <project-name>                     # render skills into .claude/skills/

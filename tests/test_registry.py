@@ -5,14 +5,18 @@ from pathlib import Path
 
 import pytest
 
+import io
+
 from fabric.registry import (
     ProjectEntry,
     RegistryError,
     fabric_home,
     find,
     load_registry,
+    parse_env_file_fabric_home,
     register,
     registry_path,
+    warn_if_systemd_env_diverges,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -105,3 +109,75 @@ def test_find_returns_entry(isolated_fabric_home: Path, tmp_path: Path) -> None:
 
 def test_find_returns_none_for_unknown(isolated_fabric_home: Path) -> None:
     assert find("nope") is None
+
+
+# ---- /etc/fabric/env consistency check ---------------------------------
+
+
+def test_parse_env_file_fabric_home_extracts_value(tmp_path: Path) -> None:
+    f = tmp_path / "env"
+    f.write_text(
+        "# header comment\n"
+        "FABRIC_HOME=/var/lib/fabric\n"
+        "FABRIC_PORT=7878\n"
+    )
+    assert parse_env_file_fabric_home(f) == "/var/lib/fabric"
+
+
+def test_parse_env_file_fabric_home_handles_quotes_and_whitespace(tmp_path: Path) -> None:
+    f = tmp_path / "env"
+    f.write_text('  FABRIC_HOME = "/var/lib/fabric"  \n')
+    assert parse_env_file_fabric_home(f) == "/var/lib/fabric"
+
+
+def test_parse_env_file_fabric_home_returns_none_when_unset(tmp_path: Path) -> None:
+    f = tmp_path / "env"
+    f.write_text("FABRIC_PORT=7878\n")
+    assert parse_env_file_fabric_home(f) is None
+
+
+def test_parse_env_file_fabric_home_returns_none_when_missing(tmp_path: Path) -> None:
+    assert parse_env_file_fabric_home(tmp_path / "absent") is None
+
+
+def test_warn_when_env_unset_but_systemd_declares(tmp_path: Path) -> None:
+    f = tmp_path / "env"
+    f.write_text("FABRIC_HOME=/var/lib/fabric\n")
+    buf = io.StringIO()
+    emitted = warn_if_systemd_env_diverges(env={}, env_file=f, stream=buf)
+    assert emitted is True
+    msg = buf.getvalue()
+    assert "/var/lib/fabric" in msg
+    assert "export FABRIC_HOME=/var/lib/fabric" in msg
+
+
+def test_warn_when_env_diverges_from_systemd(tmp_path: Path) -> None:
+    f = tmp_path / "env"
+    f.write_text("FABRIC_HOME=/var/lib/fabric\n")
+    buf = io.StringIO()
+    emitted = warn_if_systemd_env_diverges(
+        env={"FABRIC_HOME": "/tmp/other"}, env_file=f, stream=buf
+    )
+    assert emitted is True
+    assert "/var/lib/fabric" in buf.getvalue()
+    assert "/tmp/other" in buf.getvalue()
+
+
+def test_no_warn_when_env_matches_systemd(tmp_path: Path) -> None:
+    f = tmp_path / "env"
+    f.write_text("FABRIC_HOME=/var/lib/fabric\n")
+    buf = io.StringIO()
+    emitted = warn_if_systemd_env_diverges(
+        env={"FABRIC_HOME": "/var/lib/fabric"}, env_file=f, stream=buf
+    )
+    assert emitted is False
+    assert buf.getvalue() == ""
+
+
+def test_no_warn_when_systemd_env_absent(tmp_path: Path) -> None:
+    buf = io.StringIO()
+    emitted = warn_if_systemd_env_diverges(
+        env={}, env_file=tmp_path / "absent", stream=buf
+    )
+    assert emitted is False
+    assert buf.getvalue() == ""

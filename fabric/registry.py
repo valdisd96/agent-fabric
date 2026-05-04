@@ -15,13 +15,17 @@ Path resolution:
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any, Mapping
 
 import yaml
 
 from fabric.config import ConfigError, FabricConfig, load_project_config
+
+
+SYSTEMD_ENV_FILE = Path("/etc/fabric/env")
 
 
 class RegistryError(Exception):
@@ -39,6 +43,68 @@ def fabric_home() -> Path:
     """Directory holding the registry, state DB, and runtime files."""
     raw = os.environ.get("FABRIC_HOME")
     return Path(raw).expanduser() if raw else Path.home() / ".fabric"
+
+
+def parse_env_file_fabric_home(path: Path) -> str | None:
+    """Return the FABRIC_HOME value from a systemd EnvironmentFile, or None.
+
+    Tolerant of comments, blank lines, and surrounding whitespace; returns
+    None if the file is missing or has no FABRIC_HOME line. Pure helper —
+    no side effects, no logging."""
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() == "FABRIC_HOME":
+            return value.strip().strip('"').strip("'") or None
+    return None
+
+
+def warn_if_systemd_env_diverges(
+    *,
+    env: Mapping[str, str] | None = None,
+    env_file: Path = SYSTEMD_ENV_FILE,
+    stream: IO[str] | None = None,
+) -> bool:
+    """Warn when /etc/fabric/env declares FABRIC_HOME but the current env
+    doesn't, or sets it to a different value. Returns True iff a warning
+    was emitted.
+
+    The bug this prevents: an operator runs `sudo -u fabric -H fabric
+    register …` outside the systemd unit's environment. Without
+    FABRIC_HOME, the CLI writes the registry to ~/.fabric/projects.yaml
+    while the running service reads $FABRIC_HOME/projects.yaml — the
+    project never appears in /api/projects and the scheduler polls
+    nothing."""
+    env_map = os.environ if env is None else env
+    declared = parse_env_file_fabric_home(env_file)
+    if declared is None:
+        return False
+    current = env_map.get("FABRIC_HOME")
+    if current == declared:
+        return False
+    out = sys.stderr if stream is None else stream
+    if current is None:
+        print(
+            f"warning: {env_file} sets FABRIC_HOME={declared} but it is unset "
+            f"in this shell. CLI writes will go to {Path.home() / '.fabric'} "
+            f"which the systemd service does not read. "
+            f"Run: export FABRIC_HOME={declared}",
+            file=out,
+        )
+    else:
+        print(
+            f"warning: {env_file} sets FABRIC_HOME={declared} but the current "
+            f"shell has FABRIC_HOME={current}. CLI writes and the service will "
+            f"diverge.",
+            file=out,
+        )
+    return True
 
 
 def registry_path() -> Path:
@@ -128,10 +194,13 @@ __all__ = [
     "ProjectEntry",
     "RegisterResult",
     "RegistryError",
+    "SYSTEMD_ENV_FILE",
     "fabric_home",
     "find",
     "load_registry",
+    "parse_env_file_fabric_home",
     "register",
     "registry_path",
     "save_registry",
+    "warn_if_systemd_env_diverges",
 ]
