@@ -32,6 +32,7 @@ fabric/
 ├── config.py        # pydantic v2 models for .fabric/config.yaml + load_config (strict, extra="forbid")
 ├── registry.py      # ~/.fabric/projects.yaml reader/writer + register(repo_path)
 ├── render.py        # Jinja2 env (StrictUndefined, keep_trailing_newline=True), overlay resolution, render_skill
+├── state.py         # SQLite DAO at $FABRIC_HOME/state.db — schema_version + Decision-1 tables, forward-only migrations
 ├── sync.py          # iterates SKILL_NAMES, writes or --checks, SyncResult+SkillDrift with unified diffs
 └── skill_templates/ # the 5 .j2 files — package data, ships in the wheel
 
@@ -40,13 +41,14 @@ examples/
 └── github-actions/fabric-sync-check.yml # drift CI workflow projects copy into .github/workflows/
 
 tests/
-├── conftest.py        # shared fixtures (fabric_root, isolated_fabric_home, project)
+├── conftest.py        # shared fixtures (fabric_root, isolated_fabric_home, project, isolated_state_db)
 ├── fixtures/          # YAML fixtures for config/registry tests
 ├── test_config.py     # schema + load_config
 ├── test_registry.py   # ~/.fabric/projects.yaml CRUD
 ├── test_render.py     # overlay precedence, StrictUndefined, missing-template
 ├── test_sync.py       # write, idempotent, --check exit codes
 ├── test_cli_sync.py   # typer CliRunner end-to-end
+├── test_state.py      # SQLite schema, migrations, DAO, FK cascade
 └── test_parity.py     # byte-for-byte gate against teach-me-eng-bot (see below)
 ```
 
@@ -78,8 +80,8 @@ python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # tests
-pytest -q                                                    # 41 tests, parity skipped
-TEACH_ME_ENG_BOT_PATH=/path/to/teach-me-eng-bot pytest -q    # 46 tests, parity active
+pytest -q                                                    # 71 tests, parity skipped
+TEACH_ME_ENG_BOT_PATH=/path/to/teach-me-eng-bot pytest -q    # 76 tests, parity active
 
 # CLI smoke
 fabric --help
