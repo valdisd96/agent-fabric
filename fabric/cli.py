@@ -1,12 +1,13 @@
 """`fabric` CLI entry point.
 
-Phase 0A wires all eight subcommands listed in DESIGN.md "CLI modes" so the
-surface is discoverable; only `register` does real work this milestone.
-The rest stub out with exit code 2 so accidental invocations fail loudly.
+Phase 0A wired all eight subcommands so the surface is discoverable;
+each lights up as its phase ships. As of Phase 1C, `dispatch` is real;
+`tick`, `status`, `pause`, `resume`, `logs` still stub out.
 """
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import typer
@@ -98,9 +99,36 @@ def dispatch(
     project: str = typer.Argument(...),
     issue: int = typer.Argument(...),
     stage: str = typer.Argument(...),
+    model: str = typer.Option(
+        "",
+        "--model",
+        help="Override model. Empty = default + downgrade rules.",
+    ),
 ) -> None:
     """Force-dispatch an agent stage on an issue."""
-    _stub("dispatch")
+    from fabric.dispatcher import Dispatcher, DispatchError
+    from fabric.state import init_db
+
+    init_db()
+    dispatcher = Dispatcher()
+    try:
+        result = asyncio.run(
+            dispatcher.dispatch(
+                project,
+                issue,
+                stage,
+                model=model or None,
+                triggered_by="manual:cli",
+            )
+        )
+    except DispatchError as e:
+        typer.echo(f"dispatch: {e}", err=True)
+        raise typer.Exit(1) from e
+
+    typer.echo(
+        f"dispatch: id={result.dispatch_id} exit={result.exit_code} "
+        f"duration={result.duration_s:.1f}s log={result.log_path}"
+    )
 
 
 @app.command()

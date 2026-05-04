@@ -61,4 +61,4 @@ pipeline:
   retry_backoff_seconds: [60, 300, 900]
   daily_dispatch_cap: 30
 
-fabric_version: "0.0.1"
+fabric_version: "0.1.0"

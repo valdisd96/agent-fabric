@@ -18,7 +18,19 @@ def test_load_good_config() -> None:
     assert cfg.modules[0].path == "bot.py"
     assert cfg.labels.area_labels == ["bot", "vocab"]
     assert cfg.pipeline.cycle_limit == 5
-    assert cfg.fabric_version == "0.0.1"
+    assert cfg.pipeline.downgrade_low_priority is False
+    assert cfg.fabric_version == "0.1.0"
+
+
+def test_downgrade_low_priority_can_be_enabled(tmp_path: Path) -> None:
+    text = (FIXTURES / "good.yaml").read_text().replace(
+        "daily_dispatch_cap: 30",
+        "daily_dispatch_cap: 30\n  downgrade_low_priority: true",
+    )
+    p = tmp_path / "cfg.yaml"
+    p.write_text(text)
+    cfg = load_config(p)
+    assert cfg.pipeline.downgrade_low_priority is True
 
 
 def test_missing_file_raises() -> None:
