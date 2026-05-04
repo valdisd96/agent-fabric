@@ -249,6 +249,8 @@ def server(
     port: int = typer.Option(7878, "--port", envvar="FABRIC_PORT"),
 ) -> None:
     """Run the long-running fabric service (REST + WS + scheduler tick)."""
+    import os
+
     import uvicorn
 
     from fabric.dispatcher import Dispatcher
@@ -259,8 +261,49 @@ def server(
     init_db()
     dispatcher = Dispatcher()
     scheduler = Scheduler(dispatcher=dispatcher)
-    web_app = create_app(scheduler=scheduler, dispatcher=dispatcher)
+
+    tg_factory = _make_telegram_factory(host=host, port=port)
+    web_app = create_app(
+        scheduler=scheduler, dispatcher=dispatcher, telegram_factory=tg_factory
+    )
     uvicorn.run(web_app, host=host, port=port, log_level="info")
+
+
+def _make_telegram_factory(*, host: str, port: int):  # type: ignore[no-untyped-def]
+    """Return a no-arg factory that constructs+starts a TelegramBot, or None.
+
+    Disabled (with a warning at server startup) if either env var is missing.
+    """
+    import os
+
+    token = os.environ.get("FABRIC_TELEGRAM_TOKEN")
+    chat_id = os.environ.get("FABRIC_TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        typer.echo(
+            "telegram: disabled — set FABRIC_TELEGRAM_TOKEN and FABRIC_TELEGRAM_CHAT_ID",
+            err=True,
+        )
+        return None
+    try:
+        chat_id_int = int(chat_id)
+    except ValueError:
+        typer.echo(
+            f"telegram: invalid FABRIC_TELEGRAM_CHAT_ID={chat_id!r}", err=True
+        )
+        return None
+
+    rest_url = f"http://{host}:{port}"
+
+    async def factory():  # type: ignore[no-untyped-def]
+        from fabric.telegram_bot import TelegramBot
+
+        bot = TelegramBot(
+            token=token, chat_id=chat_id_int, rest_base_url=rest_url
+        )
+        await bot.start()
+        return bot
+
+    return factory
 
 
 if __name__ == "__main__":

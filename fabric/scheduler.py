@@ -49,6 +49,14 @@ _PRIORITY_RANK: dict[str, int] = {
 }
 _DEFAULT_PRIORITY_RANK = _PRIORITY_RANK["priority:medium"]
 
+# States whose entry triggers a notification for the human (1F's TG bot).
+# Notification is fired only on observed CHANGES, not on first-sight, so a
+# fabric restart re-polling in-progress state doesn't spam.
+_NOTIFY_STATE_KIND: dict[str, str] = {
+    "state:clarification-needed": "clarification",
+    "state:awaiting-decompose-approval": "decompose-approval",
+}
+
 
 @dataclass(frozen=True)
 class TickWinner:
@@ -231,6 +239,9 @@ class Scheduler:
             area_label = _label_with_prefix(issue.labels, "area:")
             author = issue.author.login if issue.author else None
 
+            prev_row = await asyncio.to_thread(state.get_issue, entry.name, issue.number)
+            prev_state = prev_row.state_label if prev_row else None
+
             await asyncio.to_thread(
                 state.upsert_issue,
                 project=entry.name,
@@ -244,6 +255,21 @@ class Scheduler:
                 author=author,
                 created_at=issue.created_at,
             )
+
+            # Fire a notification on observed state transitions. We only fire
+            # when prev_state was already populated (not on first-sight) so a
+            # fabric restart doesn't spam the human chat.
+            if (
+                prev_state is not None
+                and prev_state != state_label
+                and state_label in _NOTIFY_STATE_KIND
+            ):
+                await asyncio.to_thread(
+                    state.add_notification,
+                    kind=_NOTIFY_STATE_KIND[state_label],
+                    project=entry.name,
+                    issue=issue.number,
+                )
 
             if author not in config.project.trusted_authors:
                 continue
