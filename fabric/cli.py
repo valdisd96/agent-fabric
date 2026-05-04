@@ -243,6 +243,59 @@ def logs(
     typer.echo(log_path.read_text(), nl=False)
 
 
+@app.command(name="setup-labels")
+def setup_labels(
+    project: str = typer.Argument(..., help="Project name (must be registered)"),
+    check: bool = typer.Option(
+        False, "--check", help="Print planned changes without writing"
+    ),
+) -> None:
+    """Idempotently provision the canonical label set in a project's repo."""
+    from fabric import github as gh
+    from fabric.config import ConfigError, load_project_config
+    from fabric.labels import all_labels, apply_label_diff, diff_labels
+    from fabric.registry import find as find_project
+
+    entry = find_project(project)
+    if entry is None:
+        typer.echo(f"setup-labels: project {project!r} not registered", err=True)
+        raise typer.Exit(1)
+    try:
+        config = load_project_config(entry.path)
+    except ConfigError as e:
+        typer.echo(f"setup-labels: {e}", err=True)
+        raise typer.Exit(1) from e
+
+    target = all_labels(config.labels.area_labels)
+    try:
+        existing = gh.list_labels(entry.repo)
+    except gh.GhError as e:
+        typer.echo(f"setup-labels: {e}", err=True)
+        raise typer.Exit(2) from e
+
+    diff = diff_labels(target, existing)
+
+    for spec in diff.to_create:
+        typer.echo(f"  create: {spec.name} ({spec.color})")
+    for spec in diff.to_update:
+        typer.echo(f"  update: {spec.name} ({spec.color})")
+    typer.echo(f"  ({len(diff.unchanged)} unchanged)")
+
+    if check:
+        return
+
+    try:
+        apply_label_diff(entry.repo, diff)
+    except gh.GhError as e:
+        typer.echo(f"setup-labels: {e}", err=True)
+        raise typer.Exit(2) from e
+
+    typer.echo(
+        f"setup-labels: created {len(diff.to_create)}, "
+        f"updated {len(diff.to_update)}, unchanged {len(diff.unchanged)}"
+    )
+
+
 @app.command()
 def server(
     host: str = typer.Option("127.0.0.1", "--host", envvar="FABRIC_HOST"),

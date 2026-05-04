@@ -29,11 +29,12 @@ Conceptually identical to SCSS → CSS or `protoc` output: humans edit the sourc
 ```
 fabric/
 ├── api_models.py    # Pydantic v2 request/response shapes for the FastAPI surface (shared with TG bot, future dashboard)
-├── cli.py           # typer app — every subcommand is real; only stubs left are the not-yet-existent ones
+├── cli.py           # typer app — every subcommand is real (10 in total)
 ├── config.py        # pydantic v2 models for .fabric/config.yaml + load_config (strict, extra="forbid")
 ├── dispatcher.py    # async single-flight `claude -p` runner — semaphore, log streaming, pubsub, cycle counter
 ├── registry.py      # ~/.fabric/projects.yaml reader/writer + register(repo_path)
 ├── github.py        # `gh` CLI wrapper — sync, injectable subprocess runner, pydantic models with camelCase aliases
+├── labels.py        # canonical state/priority/type label vocabulary — diff vs GH, idempotent apply
 ├── render.py        # Jinja2 env (StrictUndefined, keep_trailing_newline=True), overlay resolution, render_skill
 ├── scheduler.py     # cross-project tick — D3 selection, three-layer pause, retry-backoff, cycle-cap auto-block
 ├── server.py        # FastAPI app + lifespan tick loop — REST endpoints from Decision 5, WS /ws/live for live events
@@ -45,6 +46,9 @@ fabric/
 examples/
 ├── teach-me-eng-bot.config.yaml         # the worked example; renders to teach-me-eng-bot's current skills byte-for-byte
 └── github-actions/fabric-sync-check.yml # drift CI workflow projects copy into .github/workflows/
+
+scripts/
+└── install-systemd.sh                   # idempotent VPC VM installer — fabric system user, systemd unit, EnvironmentFile
 
 tests/
 ├── conftest.py        # shared fixtures (fabric_root, isolated_fabric_home, project, isolated_state_db)
@@ -60,6 +64,7 @@ tests/
 ├── test_scheduler.py  # tick — pause layers, D3 sort, retry-backoff, cycle-cap, consecutive-failure block
 ├── test_server.py     # FastAPI TestClient — REST endpoints, WS pubsub, lifespan tick
 ├── test_telegram_bot.py # callback codec, formatters, handler methods (mocked context.bot), state-transition notifs
+├── test_labels.py     # canonical label set, diff/apply, gh CRUD argv
 └── test_parity.py     # byte-for-byte gate against teach-me-eng-bot (see below)
 ```
 
@@ -91,8 +96,8 @@ python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # tests
-pytest -q                                                    # 185 tests, parity skipped
-TEACH_ME_ENG_BOT_PATH=/path/to/teach-me-eng-bot pytest -q    # 190 tests, parity active
+pytest -q                                                    # 200 tests, parity skipped
+TEACH_ME_ENG_BOT_PATH=/path/to/teach-me-eng-bot pytest -q    # 205 tests, parity active
 
 # CLI smoke
 fabric --help
@@ -108,11 +113,11 @@ fabric sync teach-me-eng-bot --check               # exit 0 / "is clean"
 ## Phase status
 
 - **Phase 0 — done.** Issue #1 closed. Renderer, CLI (`register`, `sync`), 5 templates, parity gate, drift CI workflow, package data wiring all shipped.
-- **Phase 1 — next.** Issue #2. Service + Telegram bot. Scheduler, dispatcher (subprocesses `claude -p`), SQLite state, retries, cycle counter, TG notifications + slash commands. The stubbed CLI commands (`tick`, `dispatch`, `status`, `pause`, `resume`, `logs`) become real here.
-- **Phase 2 — web dashboard.** HTMX kanban + action panel.
+- **Phase 1 — done.** Issue #2 closed via 1A–1G: SQLite state (1A), gh wrapper (1B), `claude -p` dispatcher (1C), D3 scheduler (1D), FastAPI + WS (1E), Telegram bot (1F), VPC deploy + SMOKE.md (1G).
+- **Phase 2 — next.** Issue #3. HTMX kanban + action panel against the existing REST surface.
 - **Phase 3+** — multi-project hardening, GitHub App auth, webhook receiver.
 
-All Phase-1 CLI commands are real as of 1E. `logs --follow` shells out to `tail -f` on the latest dispatch's log file; `server` runs uvicorn on `$FABRIC_HOST:$FABRIC_PORT` (default `127.0.0.1:7878`). The Telegram bot (1F) auto-starts inside `fabric server`'s lifespan if both `FABRIC_TELEGRAM_TOKEN` and `FABRIC_TELEGRAM_CHAT_ID` are set; absent either, the server logs a one-line warning and continues without the bot.
+All ten CLI commands are real. `fabric server` runs uvicorn on `$FABRIC_HOST:$FABRIC_PORT` (default `127.0.0.1:7878`); the Telegram bot auto-starts inside its lifespan when `FABRIC_TELEGRAM_TOKEN` + `FABRIC_TELEGRAM_CHAT_ID` are both set, else logs a one-line warning and continues REST-only. Production install: `sudo bash scripts/install-systemd.sh` on a VPC VM, then fill `/etc/fabric/env` and `systemctl start fabric`. End-to-end walkthrough: `SMOKE.md`.
 
 ## What's deliberately not parameterized yet
 
@@ -120,6 +125,6 @@ The schema validates many knobs (modules, blocked_paths, destructive_db_patterns
 
 ## What's intentionally out of scope for this repo
 
-- The bash agent runners in `teach-me-eng-bot/scripts/agent-*.sh` keep working untouched until Phase 1 ports them to `fabric/dispatcher.py`.
+- The bash agent runners in `teach-me-eng-bot/scripts/agent-*.sh` are now superseded by `fabric/dispatcher.py`. They remain on disk as a manual fallback during the cutover window; remove them once SMOKE.md's first end-to-end run lands.
 - Committing `.fabric/config.yaml` + the drift workflow into teach-me-eng-bot itself is a teach-me-eng-bot-side change, not an agent-fabric change.
 - Publishing to PyPI — until then, projects install via `pip install agent-fabric @ git+https://github.com/valdisd96/agent-fabric.git@<sha>`.

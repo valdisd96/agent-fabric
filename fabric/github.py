@@ -84,6 +84,14 @@ class Label(_GhModel):
     name: str
 
 
+class LabelDetail(_GhModel):
+    """Fuller `gh label list --json` row — used by `fabric setup-labels`."""
+
+    name: str
+    color: str = ""
+    description: str = ""
+
+
 class IssueComment(_GhModel):
     body: str = ""
     author: Author | None = None
@@ -287,6 +295,60 @@ def merge_pr(
     _run_gh(args, runner=runner)
 
 
+def list_labels(
+    repo: str,
+    *,
+    runner: SubprocessRunner = _default_runner,
+) -> list[LabelDetail]:
+    """All labels currently defined in `repo` with their color + description."""
+    args = [
+        "label",
+        "list",
+        "--repo",
+        repo,
+        "--limit",
+        "200",
+        "--json",
+        "name,color,description",
+    ]
+    raw = _run_gh_json(args, runner=runner)
+    if not isinstance(raw, list):
+        raise GhError(f"expected list from `gh label list`, got {type(raw).__name__}")
+    return [LabelDetail.model_validate(item) for item in raw]
+
+
+def create_label(
+    repo: str,
+    name: str,
+    *,
+    color: str,
+    description: str = "",
+    runner: SubprocessRunner = _default_runner,
+) -> None:
+    args = ["label", "create", name, "--repo", repo, "--color", color]
+    if description:
+        args += ["--description", description]
+    _run_gh(args, runner=runner)
+
+
+def edit_label(
+    repo: str,
+    name: str,
+    *,
+    color: str | None = None,
+    description: str | None = None,
+    runner: SubprocessRunner = _default_runner,
+) -> None:
+    if color is None and description is None:
+        return
+    args = ["label", "edit", name, "--repo", repo]
+    if color is not None:
+        args += ["--color", color]
+    if description is not None:
+        args += ["--description", description]
+    _run_gh(args, runner=runner)
+
+
 _HTML_COMMENT_NS = "agent-fabric"
 _COMMENT_ID_RE = re.compile(r"#issuecomment-(\d+)\b")
 
@@ -358,13 +420,17 @@ __all__ = [
     "IssueDetail",
     "IssueSummary",
     "Label",
+    "LabelDetail",
     "PRSummary",
     "SubprocessRunner",
     "add_labels",
     "comment",
+    "create_label",
+    "edit_label",
     "find_pr_for_issue",
     "get_issue",
     "list_issues",
+    "list_labels",
     "merge_pr",
     "remove_labels",
     "review_pr",

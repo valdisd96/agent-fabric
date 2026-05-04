@@ -29,7 +29,7 @@ The fabric must:
 2. **Surface the queue** so you can see at a glance — on either laptop or phone — what's running, what's waiting, what needs your input.
 3. **Make human gates one-tap.** Approving a PR, answering a clarification, flipping a label, posting a comment — all from the dashboard or Telegram, without `gh` incantations.
 4. **Reuse generic skills** across projects via templates, while letting any project override any skill locally.
-5. **Stay lightweight.** Single-user. SQLite. Run on the Pi. Tailscale for remote access. No Postgres, no message queue, no Kubernetes.
+5. **Stay lightweight.** Single-user. SQLite. Runs on a small Linux VPC VM (replaces an earlier Pi-based plan; see Decision 13). No Postgres, no message queue, no Kubernetes.
 6. **Be open-source-able later.** Project-specific config is data, not code. Auth abstraction is clean enough to swap PAT for GitHub App.
 
 ## Non-goals (v1)
@@ -48,10 +48,10 @@ The fabric must:
 
 ```
                     ┌────────────────────────────────────────────────┐
-                    │              AGENT FABRIC (Pi)                 │
+                    │           AGENT FABRIC (Linux VPC VM)          │
                     │                                                │
    laptop ──HTTPS──▶│  ┌──────────────────────────────────────────┐ │
-   (Tailscale)      │  │  FastAPI  ──  REST + WebSocket           │ │
+   (Phase 2)        │  │  FastAPI  ──  REST + WebSocket           │ │
                     │  │  HTMX dashboard pages                     │ │
                     │  └──────────────────────────────────────────┘ │
                     │                     │                          │
@@ -432,7 +432,7 @@ Inline reply: replying to a notification message that's tied to an issue posts t
 
 **Choice: F1 for v1, F2 when open-sourcing.** PAT keeps setup zero-touch for a single user. GitHub App becomes worthwhile when (a) you want to share the fabric and not hand out PATs, (b) you want webhooks (Decision 9), or (c) you want fine-grained permissions per repo.
 
-Dashboard auth: HTTP basic auth over Tailscale-only HTTPS. JWT/OAuth is overkill for one user on a private network. **Never expose the dashboard to the public internet** — see Risks.
+Dashboard auth (Phase 2 only — Phase 1 has no inbound HTTP): HTTP basic auth + private-network-only ingress. The VPC VM's internal network or a Tailscale exit-node both work; **never expose the dashboard to the public internet** — see Risks.
 
 Telegram auth: bot only responds to a single hardcoded `chat_id` (yours). Anyone else gets ignored.
 
@@ -471,7 +471,14 @@ Inherited from orchestrator plan G2: 3 retries with backoff (60s, 5min, 15min), 
 
 ### Decision 13 — Deployment
 
-Single systemd unit on the Pi:
+Single systemd unit on a generic Linux VPC VM (Debian/Ubuntu). The earlier
+Pi-on-Tailscale plan is dropped: the VM runs in a private VPC with outbound
+internet for `gh` / `claude` / Telegram polling, and Phase 1 needs **no**
+inbound HTTP — the Telegram bot is long-poll. Phase 2's dashboard adds
+inbound, at which point a private ingress (VPC-internal LB or Tailscale
+exit-node) takes over. The unit is provisioned by `scripts/install-systemd.sh`
+(idempotent; creates the `fabric` system user, drops a 0600 `EnvironmentFile`,
+enables but does not auto-start the service).
 
 ```ini
 [Unit]
@@ -481,18 +488,25 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/srv/agent-fabric/.venv/bin/python -m fabric.server
-Restart=always
-RestartSec=5
 User=fabric
 WorkingDirectory=/srv/agent-fabric
-Environment="FABRIC_HOME=/var/lib/fabric"
+EnvironmentFile=/etc/fabric/env
+ExecStart=/srv/agent-fabric/.venv/bin/fabric server
+Restart=always
+RestartSec=5
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/fabric
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Tailscale provides the network — both dashboard (HTTPS via `tailscale serve`) and the fabric's outbound `gh`/`claude` calls share the host's network namespace. No port-forwarding to the public internet.
+`/etc/fabric/env` carries `FABRIC_HOME`, `FABRIC_HOST`, `FABRIC_PORT`,
+`FABRIC_TELEGRAM_TOKEN`, `FABRIC_TELEGRAM_CHAT_ID`. See SMOKE.md for the
+full bring-up walkthrough on a fresh VM.
 
 ### Decision 14 — CLI modes
 
@@ -567,7 +581,7 @@ The current plan in `orchestrator-plan.md` was never fully built (only the agent
 
 ### Risks
 
-1. **Dashboard-as-RCE.** The dashboard can dispatch agents, merge PRs, and edit labels across N repos. If exposed beyond Tailscale or auth fails, it's effectively a remote-code-execution surface. Mitigations: Tailscale-only, basic auth, action audit log in DB, rate limit on destructive endpoints.
+1. **Dashboard-as-RCE.** The dashboard can dispatch agents, merge PRs, and edit labels across N repos. If exposed publicly or auth fails, it's effectively a remote-code-execution surface. Mitigations (Phase 2): private-VPC ingress only, basic auth, action audit log in DB, rate limit on destructive endpoints. (Phase 1 has no inbound HTTP at all — Telegram is long-poll outbound.)
 2. **Single point of failure.** Fabric crashes → no project ships. Mitigations: systemd restart, SQLite state survives restart, health endpoint pinged by external uptime monitor.
 3. **Skill-template drift across projects.** Updating a template ripples to all 6–8 projects. A bad template change ships bad PRs everywhere. Mitigations: `fabric sync --dry-run` shows diff per project; `fabric_version` in config pins compatibility; CI drift check fails the build on stale skills.
 4. **Quota explosion.** 6–8 projects × pipeline activity can burn weekly Pro/Max budget faster than you notice. Mitigations: per-project daily cap, Telegram alert at 80% of cap, optional Sonnet downgrade for low-priority work.
