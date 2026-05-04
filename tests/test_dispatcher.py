@@ -132,6 +132,51 @@ def test_dispatch_argv_uses_default_model_and_project_path(
     assert any("plan-exec" in a and "issue #7" in a for a in args)
 
 
+def test_dispatch_argv_isolates_prompt_from_variadic_add_dir(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    """Regression: `--add-dir <directories...>` is variadic. The prompt
+    must sit after a `--` separator so claude does not absorb it as a
+    second directory and abort with "Input must be provided …"."""
+
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    spawner = FakeSpawner()
+    d = Dispatcher(spawner=spawner)
+
+    _aiorun(d.dispatch("teach-me-eng-bot", 7, "plan-exec"))
+
+    args = spawner.calls[0]
+    assert "--" in args, "prompt must follow a -- separator"
+    sep_idx = args.index("--")
+    add_dir_idx = args.index("--add-dir")
+    assert add_dir_idx < sep_idx, "--add-dir must come before -- so its argument is unambiguous"
+    prompt_idx = next(
+        i for i, a in enumerate(args) if "plan-exec" in a and "issue #7" in a
+    )
+    assert prompt_idx > sep_idx, "prompt must come after --"
+
+
+def test_dispatch_argv_sets_bypass_permission_mode(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    """Unattended dispatch needs `--permission-mode bypassPermissions` —
+    the default mode prompts on every tool call, which never resolves
+    without a TTY and silently produces empty output."""
+
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    spawner = FakeSpawner()
+    d = Dispatcher(spawner=spawner)
+
+    _aiorun(d.dispatch("teach-me-eng-bot", 1, "plan-exec"))
+
+    args = spawner.calls[0]
+    assert "--permission-mode" in args
+    mode_idx = args.index("--permission-mode")
+    assert args[mode_idx + 1] == "bypassPermissions"
+
+
 def test_dispatch_records_started_completed_and_quota(
     isolated_state_db: Path, tmp_path: Path
 ) -> None:
