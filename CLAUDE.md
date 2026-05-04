@@ -28,13 +28,15 @@ Conceptually identical to SCSS → CSS or `protoc` output: humans edit the sourc
 
 ```
 fabric/
-├── cli.py           # typer app — register, sync, dispatch, tick, pause, resume, status (real); logs (stub)
+├── api_models.py    # Pydantic v2 request/response shapes for the FastAPI surface (shared with TG bot, future dashboard)
+├── cli.py           # typer app — every subcommand is real; only stubs left are the not-yet-existent ones
 ├── config.py        # pydantic v2 models for .fabric/config.yaml + load_config (strict, extra="forbid")
 ├── dispatcher.py    # async single-flight `claude -p` runner — semaphore, log streaming, pubsub, cycle counter
 ├── registry.py      # ~/.fabric/projects.yaml reader/writer + register(repo_path)
 ├── github.py        # `gh` CLI wrapper — sync, injectable subprocess runner, pydantic models with camelCase aliases
 ├── render.py        # Jinja2 env (StrictUndefined, keep_trailing_newline=True), overlay resolution, render_skill
 ├── scheduler.py     # cross-project tick — D3 selection, three-layer pause, retry-backoff, cycle-cap auto-block
+├── server.py        # FastAPI app + lifespan tick loop — REST endpoints from Decision 5, WS /ws/live for live events
 ├── state.py         # SQLite DAO at $FABRIC_HOME/state.db — schema_version + Decision-1 tables, forward-only migrations
 ├── sync.py          # iterates SKILL_NAMES, writes or --checks, SyncResult+SkillDrift with unified diffs
 └── skill_templates/ # the 5 .j2 files — package data, ships in the wheel
@@ -55,6 +57,7 @@ tests/
 ├── test_github.py     # gh CLI wrapper — argv, JSON parsing, set_html_comment idempotency
 ├── test_dispatcher.py # claude -p subprocess, log streaming, single-flight, cycle counter, downgrade rules
 ├── test_scheduler.py  # tick — pause layers, D3 sort, retry-backoff, cycle-cap, consecutive-failure block
+├── test_server.py     # FastAPI TestClient — REST endpoints, WS pubsub, lifespan tick
 └── test_parity.py     # byte-for-byte gate against teach-me-eng-bot (see below)
 ```
 
@@ -86,8 +89,8 @@ python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # tests
-pytest -q                                                    # 141 tests, parity skipped
-TEACH_ME_ENG_BOT_PATH=/path/to/teach-me-eng-bot pytest -q    # 146 tests, parity active
+pytest -q                                                    # 161 tests, parity skipped
+TEACH_ME_ENG_BOT_PATH=/path/to/teach-me-eng-bot pytest -q    # 166 tests, parity active
 
 # CLI smoke
 fabric --help
@@ -107,7 +110,7 @@ fabric sync teach-me-eng-bot --check               # exit 0 / "is clean"
 - **Phase 2 — web dashboard.** HTMX kanban + action panel.
 - **Phase 3+** — multi-project hardening, GitHub App auth, webhook receiver.
 
-Phase-1 CLI commands today: `dispatch` (1C), `tick`, `pause`, `resume`, `status` (1D) are real. Only `logs` still exits code 2 with "not implemented in phase 0" — it lights up in 1E once the WS log-tail endpoint exists.
+All Phase-1 CLI commands are real as of 1E. `logs --follow` shells out to `tail -f` on the latest dispatch's log file; `server` runs uvicorn on `$FABRIC_HOST:$FABRIC_PORT` (default `127.0.0.1:7878`).
 
 ## What's deliberately not parameterized yet
 

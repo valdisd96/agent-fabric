@@ -144,6 +144,13 @@ class Dispatcher:
         self._subscribers.append(q)
         return q
 
+    def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        """Stop receiving events on `queue`. Idempotent."""
+        try:
+            self._subscribers.remove(queue)
+        except ValueError:
+            pass
+
     # ---- internals ----
 
     def _load_project(self, project: str) -> tuple[ProjectEntry, FabricConfig]:

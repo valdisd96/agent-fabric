@@ -225,7 +225,42 @@ def logs(
     follow: bool = typer.Option(False, "--follow", "-f"),
 ) -> None:
     """Tail the latest agent log for an issue."""
-    _stub("logs")
+    import os
+
+    from fabric.state import init_db, latest_dispatch
+
+    init_db()
+    d = latest_dispatch(project, issue)
+    if d is None or d.log_path is None:
+        typer.echo(f"logs: no dispatch found for {project}#{issue}", err=True)
+        raise typer.Exit(1)
+    log_path = Path(d.log_path)
+    if not log_path.exists():
+        typer.echo(f"logs: log file missing: {d.log_path}", err=True)
+        raise typer.Exit(1)
+    if follow:
+        os.execvp("tail", ["tail", "-f", str(log_path)])
+    typer.echo(log_path.read_text(), nl=False)
+
+
+@app.command()
+def server(
+    host: str = typer.Option("127.0.0.1", "--host", envvar="FABRIC_HOST"),
+    port: int = typer.Option(7878, "--port", envvar="FABRIC_PORT"),
+) -> None:
+    """Run the long-running fabric service (REST + WS + scheduler tick)."""
+    import uvicorn
+
+    from fabric.dispatcher import Dispatcher
+    from fabric.scheduler import Scheduler
+    from fabric.server import create_app
+    from fabric.state import init_db
+
+    init_db()
+    dispatcher = Dispatcher()
+    scheduler = Scheduler(dispatcher=dispatcher)
+    web_app = create_app(scheduler=scheduler, dispatcher=dispatcher)
+    uvicorn.run(web_app, host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":
