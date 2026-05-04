@@ -128,6 +128,17 @@ def client(setup: dict[str, Any]) -> TestClient:
         yield c
 
 
+# ---------- liveness ----------
+
+
+def test_healthz_returns_ok(client: TestClient) -> None:
+    """Liveness probe — must not depend on the DB, gh, or claude. Reverse
+    proxies and uptime monitors hit this on every poll."""
+    r = client.get("/healthz")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True}
+
+
 # ---------- read paths ----------
 
 
