@@ -92,7 +92,7 @@ Use the `dev-flow` skill — branch → change → commit → PR → wait. The u
 
 ```bash
 # setup
-python3.11 -m venv .venv && source .venv/bin/activate
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # tests

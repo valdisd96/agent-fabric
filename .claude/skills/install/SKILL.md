@@ -1,20 +1,23 @@
 ---
 name: install
-description: Step-by-step procedure for installing agent-fabric on a fresh Ubuntu 24.04 (or Debian 12) VPS and registering the first managed project. Invoke when the user asks to "install", "deploy", "set up", "provision", or "bring up" agent-fabric on a server, VM, or VPS — or asks how to run it next to a managed project like teach-me-eng-bot. Project-internal; not rendered into managed projects by `fabric sync`.
-version: 1.0.0
+description: Step-by-step procedure for installing agent-fabric on a fresh Ubuntu 24.04 LTS VPS and registering the first managed project. Invoke when the user asks to "install", "deploy", "set up", "provision", or "bring up" agent-fabric on a server, VM, or VPS — or asks how to run it next to a managed project like teach-me-eng-bot. Project-internal; not rendered into managed projects by `fabric sync`.
+version: 1.1.0
 ---
 
 # install
 
-Install `agent-fabric` on a fresh Ubuntu 24.04 / Debian 12 VPS, bring up the
+Install `agent-fabric` on a fresh Ubuntu 24.04 LTS VPS, bring up the
 systemd service, and register the first managed project. Companion to
 `SMOKE.md` (the lightweight end-to-end smoke test) — this skill is the
 *detailed* install runbook with the gotchas filled in.
 
-If the user is on a different distro, stop and confirm — package names and
-service paths below assume `apt` + `systemd`. If they're trying to run
-locally for development, point them at `CLAUDE.md` ("Working in this repo")
-instead — this skill is for the deployed service path.
+If the user is on a different distro, stop and confirm — package names,
+service paths, and the Python 3.12 default below assume Ubuntu 24.04 +
+`apt` + `systemd`. Debian 12 ships Python 3.11 and won't satisfy the
+`requires-python = ">=3.12"` pin without `pyenv` or building from source —
+push back rather than improvising. If they're trying to run locally for
+development, point them at `CLAUDE.md` ("Working in this repo") instead —
+this skill is for the deployed service path.
 
 ## What you'll end up with
 
@@ -35,7 +38,7 @@ across all projects (single-flight invariant — see DESIGN.md).
 
 Before running anything, confirm with the user that they have:
 
-- A fresh Ubuntu 24.04 LTS (or Debian 12) VPS with sudo / root access.
+- A fresh Ubuntu 24.04 LTS VPS with sudo / root access.
 - A GitHub Personal Access Token with `repo` scope (and `workflow` if any
   managed project's `safety.blocked_paths` permits `.github/workflows/`
   edits — teach-me-eng-bot blocks them, so `repo` alone is enough there).
@@ -53,20 +56,18 @@ fabricate PATs.
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y python3.11 python3.11-venv git curl jq ca-certificates
+sudo apt-get install -y python3.12 python3.12-venv git curl jq ca-certificates
 ```
 
-Ubuntu 24.04 ships Python 3.12 by default but does not include 3.11. If
-`python3.11` is unavailable from the default repos, add deadsnakes:
+Ubuntu 24.04 ships Python 3.12 in the default repos, which matches the
+`requires-python = ">=3.12"` pin in `pyproject.toml` and what CI tests
+against — no PPA or deadsnakes needed.
+
+Confirm the interpreter is on `$PATH` before continuing:
 
 ```bash
-sudo add-apt-repository -y ppa:deadsnakes/ppa
-sudo apt-get update
-sudo apt-get install -y python3.11 python3.11-venv
+python3.12 --version       # e.g. Python 3.12.3
 ```
-
-Why 3.11 specifically: `pyproject.toml` pins `requires-python = ">=3.11"`
-and the parity tests are run against 3.11 in CI.
 
 ## Step 2 — install `gh` and `claude` CLIs
 
@@ -100,7 +101,7 @@ claude --version
 sudo install -d -o "$USER" /srv/agent-fabric
 git clone https://github.com/valdisd96/agent-fabric /srv/agent-fabric
 cd /srv/agent-fabric
-python3.11 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -e .
@@ -108,8 +109,9 @@ fabric --help            # sanity check — must list 10 subcommands
 deactivate
 ```
 
-If `fabric --help` errors with `ModuleNotFoundError`, the venv isn't
-3.11 — re-create it with `python3.11 -m venv` explicitly.
+If `pip install` errors with `Package requires a different Python:
+3.x is not in '>=3.12'`, the venv was created with the wrong interpreter
+— delete `.venv/` and re-run with `python3.12 -m venv` explicitly.
 
 ## Step 4 — install the systemd unit (creates the `fabric` user)
 

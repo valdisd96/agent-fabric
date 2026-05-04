@@ -17,7 +17,7 @@ Telegram. This replaces the earlier Pi/Tailscale plan — see DESIGN.md
 
 ```bash
 # As root
-apt-get update && apt-get install -y python3.11 python3.11-venv git curl jq
+apt-get update && apt-get install -y python3.12 python3.12-venv git curl jq
 
 # Install gh and claude per their docs
 # (gh: https://cli.github.com — claude: https://docs.claude.com/en/docs/claude-code)
@@ -29,7 +29,7 @@ apt-get update && apt-get install -y python3.11 python3.11-venv git curl jq
 sudo install -d -o "$USER" /srv/agent-fabric
 git clone https://github.com/valdisd96/agent-fabric /srv/agent-fabric
 cd /srv/agent-fabric
-python3.11 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 

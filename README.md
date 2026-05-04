@@ -13,7 +13,7 @@ Phase 0 (extract & generalize) — in progress. Phases tracked as GitHub issues.
 ## Install (dev)
 
 ```bash
-python3.11 -m venv .venv && source .venv/bin/activate
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
