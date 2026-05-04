@@ -39,6 +39,7 @@ fabric/
 ├── server.py        # FastAPI app + lifespan tick loop — REST endpoints from Decision 5, WS /ws/live for live events
 ├── state.py         # SQLite DAO at $FABRIC_HOME/state.db — schema_version + Decision-1 tables, forward-only migrations
 ├── sync.py          # iterates SKILL_NAMES, writes or --checks, SyncResult+SkillDrift with unified diffs
+├── telegram_bot.py  # python-telegram-bot — slash cmds, inline buttons, reply→comment, notification poller
 └── skill_templates/ # the 5 .j2 files — package data, ships in the wheel
 
 examples/
@@ -58,6 +59,7 @@ tests/
 ├── test_dispatcher.py # claude -p subprocess, log streaming, single-flight, cycle counter, downgrade rules
 ├── test_scheduler.py  # tick — pause layers, D3 sort, retry-backoff, cycle-cap, consecutive-failure block
 ├── test_server.py     # FastAPI TestClient — REST endpoints, WS pubsub, lifespan tick
+├── test_telegram_bot.py # callback codec, formatters, handler methods (mocked context.bot), state-transition notifs
 └── test_parity.py     # byte-for-byte gate against teach-me-eng-bot (see below)
 ```
 
@@ -89,8 +91,8 @@ python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
 # tests
-pytest -q                                                    # 161 tests, parity skipped
-TEACH_ME_ENG_BOT_PATH=/path/to/teach-me-eng-bot pytest -q    # 166 tests, parity active
+pytest -q                                                    # 185 tests, parity skipped
+TEACH_ME_ENG_BOT_PATH=/path/to/teach-me-eng-bot pytest -q    # 190 tests, parity active
 
 # CLI smoke
 fabric --help
@@ -110,7 +112,7 @@ fabric sync teach-me-eng-bot --check               # exit 0 / "is clean"
 - **Phase 2 — web dashboard.** HTMX kanban + action panel.
 - **Phase 3+** — multi-project hardening, GitHub App auth, webhook receiver.
 
-All Phase-1 CLI commands are real as of 1E. `logs --follow` shells out to `tail -f` on the latest dispatch's log file; `server` runs uvicorn on `$FABRIC_HOST:$FABRIC_PORT` (default `127.0.0.1:7878`).
+All Phase-1 CLI commands are real as of 1E. `logs --follow` shells out to `tail -f` on the latest dispatch's log file; `server` runs uvicorn on `$FABRIC_HOST:$FABRIC_PORT` (default `127.0.0.1:7878`). The Telegram bot (1F) auto-starts inside `fabric server`'s lifespan if both `FABRIC_TELEGRAM_TOKEN` and `FABRIC_TELEGRAM_CHAT_ID` are set; absent either, the server logs a one-line warning and continues without the bot.
 
 ## What's deliberately not parameterized yet
 

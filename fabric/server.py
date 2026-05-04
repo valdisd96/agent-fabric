@@ -16,7 +16,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.websockets import WebSocketDisconnect
@@ -32,12 +32,16 @@ from fabric.scheduler import Scheduler
 log = logging.getLogger("fabric.server")
 
 
+TelegramBotFactory = Any  # callable returning an awaitable that yields a bot with stop()
+
+
 def create_app(
     *,
     scheduler: Scheduler,
     dispatcher: Dispatcher,
     gh_runner: gh.SubprocessRunner | None = None,
     tick_interval_s: float = 60.0,
+    telegram_factory: TelegramBotFactory | None = None,
 ) -> FastAPI:
     runner: gh.SubprocessRunner = gh_runner or gh._default_runner
 
@@ -45,11 +49,22 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         stop_event = asyncio.Event()
         task = asyncio.create_task(_tick_loop(scheduler, stop_event, tick_interval_s))
+        tg_bot = None
+        if telegram_factory is not None:
+            try:
+                tg_bot = await telegram_factory()
+            except Exception:
+                log.exception("telegram factory failed; bot disabled")
         try:
             yield
         finally:
             stop_event.set()
             await task
+            if tg_bot is not None:
+                try:
+                    await tg_bot.stop()
+                except Exception:
+                    log.exception("telegram bot shutdown failed")
 
     app = FastAPI(title="agent-fabric", lifespan=lifespan)
     app.state.scheduler = scheduler

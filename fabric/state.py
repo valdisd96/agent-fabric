@@ -76,6 +76,8 @@ class NotificationRow:
     created_at: str
     delivered_to: str | None
     acknowledged_at: str | None
+    tg_chat_id: int | None = None
+    tg_message_id: int | None = None
 
 
 def state_db_path() -> Path:
@@ -158,7 +160,19 @@ ALTER TABLE issues ADD COLUMN created_at TEXT;
 """
 
 
-_MIGRATIONS: list[tuple[int, str]] = [(1, _SCHEMA_V1), (2, _SCHEMA_V2)]
+_SCHEMA_V3 = """
+ALTER TABLE notifications ADD COLUMN tg_chat_id INTEGER;
+ALTER TABLE notifications ADD COLUMN tg_message_id INTEGER;
+CREATE INDEX idx_notifications_tg
+  ON notifications(tg_chat_id, tg_message_id);
+"""
+
+
+_MIGRATIONS: list[tuple[int, str]] = [
+    (1, _SCHEMA_V1),
+    (2, _SCHEMA_V2),
+    (3, _SCHEMA_V3),
+]
 
 
 def _utc_now() -> str:
@@ -571,6 +585,32 @@ def list_unacked_notifications() -> list[NotificationRow]:
         return [NotificationRow(**dict(r)) for r in rows]
 
 
+def set_notification_tg_message(
+    notification_id: int, *, chat_id: int, message_id: int
+) -> None:
+    """Record the Telegram message we sent for this notification."""
+    with connect() as conn:
+        result = conn.execute(
+            "UPDATE notifications SET tg_chat_id = ?, tg_message_id = ? WHERE id = ?",
+            (chat_id, message_id, notification_id),
+        )
+        if result.rowcount == 0:
+            raise StateError(f"notification {notification_id} not found")
+        conn.commit()
+
+
+def find_notification_by_tg_message(
+    chat_id: int, message_id: int
+) -> NotificationRow | None:
+    """Reverse-lookup: given a TG (chat_id, message_id), find the notification."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM notifications WHERE tg_chat_id = ? AND tg_message_id = ?",
+            (chat_id, message_id),
+        ).fetchone()
+        return NotificationRow(**dict(row)) if row else None
+
+
 __all__ = [
     "DispatchRow",
     "IssueRow",
@@ -585,6 +625,7 @@ __all__ = [
     "delete_project",
     "delete_setting",
     "dispatches_for_issue",
+    "find_notification_by_tg_message",
     "get_issue",
     "get_project",
     "get_setting",
@@ -598,6 +639,7 @@ __all__ = [
     "recent_dispatches",
     "record_dispatch",
     "set_cycle_count",
+    "set_notification_tg_message",
     "set_project_last_served",
     "set_project_paused",
     "set_setting",
