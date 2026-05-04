@@ -17,6 +17,7 @@ set -euo pipefail
 FABRIC_USER=${FABRIC_USER:-fabric}
 FABRIC_HOME=${FABRIC_HOME:-/var/lib/fabric}
 INSTALL_PREFIX=${INSTALL_PREFIX:-/srv/agent-fabric}
+PROJECTS_DIR=${PROJECTS_DIR:-/srv/projects}
 
 UNIT_PATH=/etc/systemd/system/fabric.service
 ENV_DIR=/etc/fabric
@@ -24,6 +25,7 @@ ENV_FILE=$ENV_DIR/env
 VENV_PYTHON=$INSTALL_PREFIX/.venv/bin/fabric
 
 log() { echo "[install-systemd] $*"; }
+warn() { echo "[install-systemd] WARN: $*" >&2; }
 
 require_root() {
   if [[ $EUID -ne 0 ]]; then
@@ -40,6 +42,43 @@ ensure_user() {
     useradd --system --home "$FABRIC_HOME" --create-home --shell /usr/sbin/nologin "$FABRIC_USER"
   fi
   install -d -o "$FABRIC_USER" -g "$FABRIC_USER" -m 0750 "$FABRIC_HOME"
+}
+
+ensure_projects_dir() {
+  if [[ -d "$PROJECTS_DIR" ]]; then
+    log "$PROJECTS_DIR exists"
+  else
+    log "creating $PROJECTS_DIR ($FABRIC_USER:$FABRIC_USER 0750)"
+  fi
+  install -d -o "$FABRIC_USER" -g "$FABRIC_USER" -m 0750 "$PROJECTS_DIR"
+}
+
+# `claude` installed via the official curl|sh installer lands at
+# ~/.local/share/claude/versions/<v> — under HOME, which the unit's
+# ProtectHome=true makes invisible to the service. A naive symlink from
+# /usr/local/bin/claude resolves to that hidden path and every dispatch
+# fails at exec. Detect and tell the operator how to relocate.
+check_claude_path() {
+  local claude_path
+  claude_path=$(command -v claude 2>/dev/null) || {
+    warn "'claude' not on PATH. Install Claude Code (https://docs.claude.com) before starting the service."
+    return 0
+  }
+  local resolved
+  resolved=$(readlink -f "$claude_path")
+  case "$resolved" in
+    /root/*|/home/*)
+      warn "claude resolves to $resolved (under \$HOME)."
+      warn "ProtectHome=true in fabric.service will hide this path from the service."
+      warn "Fix: copy the binary out of \$HOME and re-symlink, e.g.:"
+      warn "  install -d /usr/local/share/claude"
+      warn "  cp $resolved /usr/local/share/claude/claude-\$(claude --version | awk '{print \$1}')"
+      warn "  ln -sfn /usr/local/share/claude/claude-* /usr/local/bin/claude"
+      ;;
+    *)
+      log "claude resolves to $resolved (OK — outside \$HOME)"
+      ;;
+  esac
 }
 
 ensure_env_file() {
@@ -94,8 +133,10 @@ EOF
 main() {
   require_root
   ensure_user
+  ensure_projects_dir
   ensure_env_file
   install_unit
+  check_claude_path
   systemctl daemon-reload
   systemctl enable fabric
   log "installed. Edit $ENV_FILE and run: systemctl start fabric"
