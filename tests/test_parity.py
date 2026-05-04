@@ -26,6 +26,7 @@ from fabric.render import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXAMPLE_CONFIG = REPO_ROOT / "examples" / "teach-me-eng-bot.config.yaml"
+FABRIC_PKG = REPO_ROOT / "fabric"
 
 
 def _project_root() -> Path | None:
@@ -50,7 +51,7 @@ def test_template_matches_teach_me_eng_bot(name: str, tmp_path: Path) -> None:
     fake_project = tmp_path / "fake-project"
     fake_project.mkdir()
     config = load_config(EXAMPLE_CONFIG)
-    rendered = render_skill(name, fake_project, config, fabric_root=REPO_ROOT)
+    rendered = render_skill(name, fake_project, config, fabric_root=FABRIC_PKG)
 
     if rendered == expected:
         return

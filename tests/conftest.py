@@ -11,8 +11,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 @pytest.fixture
 def fabric_root() -> Path:
-    """Path to the fabric repo root (so tests find `skill_templates/`)."""
-    return REPO_ROOT
+    """Directory containing `skill_templates/` — the `fabric` package dir."""
+    return REPO_ROOT / "fabric"
 
 
 @pytest.fixture
