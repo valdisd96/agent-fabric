@@ -34,6 +34,8 @@ class ProjectRow:
     repo: str
     fabric_version: str | None
     registered_at: str
+    last_served_at: str | None = None
+    paused: bool = False
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,8 @@ class IssueRow:
     url: str | None
     cycle_count: int
     last_seen_at: str
+    author: str | None = None
+    created_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -146,7 +150,15 @@ CREATE TABLE settings (
 );
 """
 
-_MIGRATIONS: list[tuple[int, str]] = [(1, _SCHEMA_V1)]
+_SCHEMA_V2 = """
+ALTER TABLE projects ADD COLUMN last_served_at TEXT;
+ALTER TABLE projects ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE issues ADD COLUMN author TEXT;
+ALTER TABLE issues ADD COLUMN created_at TEXT;
+"""
+
+
+_MIGRATIONS: list[tuple[int, str]] = [(1, _SCHEMA_V1), (2, _SCHEMA_V2)]
 
 
 def _utc_now() -> str:
@@ -239,13 +251,59 @@ def upsert_project(
         conn.commit()
 
 
+def _project_from_row(r: sqlite3.Row) -> ProjectRow:
+    return ProjectRow(
+        name=r["name"],
+        path=r["path"],
+        repo=r["repo"],
+        fabric_version=r["fabric_version"],
+        registered_at=r["registered_at"],
+        last_served_at=r["last_served_at"],
+        paused=bool(r["paused"]),
+    )
+
+
+_PROJECT_COLS = (
+    "name, path, repo, fabric_version, registered_at, last_served_at, paused"
+)
+
+
 def list_projects() -> list[ProjectRow]:
     with connect() as conn:
         rows = conn.execute(
-            "SELECT name, path, repo, fabric_version, registered_at "
-            "FROM projects ORDER BY name"
+            f"SELECT {_PROJECT_COLS} FROM projects ORDER BY name"
         ).fetchall()
-        return [ProjectRow(**dict(r)) for r in rows]
+        return [_project_from_row(r) for r in rows]
+
+
+def get_project(name: str) -> ProjectRow | None:
+    with connect() as conn:
+        row = conn.execute(
+            f"SELECT {_PROJECT_COLS} FROM projects WHERE name = ?", (name,)
+        ).fetchone()
+        return _project_from_row(row) if row else None
+
+
+def set_project_paused(name: str, paused: bool) -> None:
+    with connect() as conn:
+        result = conn.execute(
+            "UPDATE projects SET paused = ? WHERE name = ?",
+            (1 if paused else 0, name),
+        )
+        if result.rowcount == 0:
+            raise StateError(f"project {name!r} not found")
+        conn.commit()
+
+
+def set_project_last_served(name: str, ts: str) -> None:
+    with connect() as conn:
+        result = conn.execute(
+            "UPDATE projects SET last_served_at = ? WHERE name = ?",
+            (ts, name),
+        )
+        if result.rowcount == 0:
+            raise StateError(f"project {name!r} not found")
+        conn.commit()
 
 
 def delete_project(name: str) -> None:
@@ -267,12 +325,15 @@ def upsert_issue(
     area_label: str | None = None,
     title: str | None = None,
     url: str | None = None,
+    author: str | None = None,
+    created_at: str | None = None,
 ) -> None:
     with connect() as conn:
         conn.execute(
             "INSERT INTO issues (project, number, state_label, type_label, "
-            "                    priority_label, area_label, title, url, last_seen_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "                    priority_label, area_label, title, url, "
+            "                    author, created_at, last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(project, number) DO UPDATE SET "
             "  state_label = excluded.state_label, "
             "  type_label = excluded.type_label, "
@@ -280,6 +341,8 @@ def upsert_issue(
             "  area_label = excluded.area_label, "
             "  title = excluded.title, "
             "  url = excluded.url, "
+            "  author = excluded.author, "
+            "  created_at = COALESCE(issues.created_at, excluded.created_at), "
             "  last_seen_at = excluded.last_seen_at",
             (
                 project,
@@ -290,6 +353,8 @@ def upsert_issue(
                 area_label,
                 title,
                 url,
+                author,
+                created_at,
                 _utc_now(),
             ),
         )
@@ -398,6 +463,30 @@ def latest_dispatch(project: str, issue: int) -> DispatchRow | None:
         return DispatchRow(**dict(row)) if row else None
 
 
+def dispatches_for_issue(project: str, issue: int, *, limit: int = 50) -> list[DispatchRow]:
+    """Newest-first dispatch history for one issue."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM dispatches WHERE project = ? AND issue = ? "
+            "ORDER BY started_at DESC, id DESC LIMIT ?",
+            (project, issue, limit),
+        ).fetchall()
+        return [DispatchRow(**dict(r)) for r in rows]
+
+
+def consecutive_failures(project: str, issue: int) -> int:
+    """How many failed dispatches since the most recent success (or all)."""
+    rows = dispatches_for_issue(project, issue, limit=50)
+    count = 0
+    for r in rows:  # newest first
+        if r.exit_code is None:
+            continue  # still running, ignore
+        if r.exit_code == 0:
+            break
+        count += 1
+    return count
+
+
 def recent_dispatches(*, project: str | None = None, limit: int = 50) -> list[DispatchRow]:
     with connect() as conn:
         if project is None:
@@ -492,9 +581,12 @@ __all__ = [
     "add_notification",
     "complete_dispatch",
     "connect",
+    "consecutive_failures",
     "delete_project",
     "delete_setting",
+    "dispatches_for_issue",
     "get_issue",
+    "get_project",
     "get_setting",
     "inc_quota",
     "init_db",
@@ -506,6 +598,8 @@ __all__ = [
     "recent_dispatches",
     "record_dispatch",
     "set_cycle_count",
+    "set_project_last_served",
+    "set_project_paused",
     "set_setting",
     "state_db_path",
     "upsert_issue",

@@ -10,9 +10,12 @@ from fabric.state import (
     add_notification,
     complete_dispatch,
     connect,
+    consecutive_failures,
     delete_project,
     delete_setting,
+    dispatches_for_issue,
     get_issue,
+    get_project,
     get_setting,
     inc_quota,
     init_db,
@@ -24,6 +27,8 @@ from fabric.state import (
     recent_dispatches,
     record_dispatch,
     set_cycle_count,
+    set_project_last_served,
+    set_project_paused,
     set_setting,
     state_db_path,
     upsert_issue,
@@ -59,17 +64,21 @@ def test_init_db_creates_tables(isolated_fabric_home: Path) -> None:
 
 
 def test_init_db_records_schema_version(isolated_state_db: Path) -> None:
+    from fabric.state import _MIGRATIONS
+
     with connect(isolated_state_db) as conn:
         rows = conn.execute("SELECT version FROM schema_version").fetchall()
-    assert {r["version"] for r in rows} == {1}
+    assert {r["version"] for r in rows} == {v for v, _ in _MIGRATIONS}
 
 
 def test_init_db_is_idempotent(isolated_fabric_home: Path) -> None:
+    p1 = init_db()
+    with connect(p1) as conn:
+        n1 = conn.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()["n"]
     init_db()
-    init_db()  # second call must not fail or duplicate-record
-    with connect() as conn:
-        n = conn.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()["n"]
-    assert n == 1
+    with connect(p1) as conn:
+        n2 = conn.execute("SELECT COUNT(*) AS n FROM schema_version").fetchone()["n"]
+    assert n1 == n2 and n1 > 0
 
 
 def test_pragmas_are_set(isolated_state_db: Path) -> None:
@@ -124,6 +133,38 @@ def test_upsert_project_updates_existing(isolated_state_db: Path) -> None:
     assert len(rows) == 1
     assert rows[0].path == "/new"
     assert rows[0].fabric_version == "0.1.0"
+
+
+def test_get_project_returns_paused_and_last_served(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    p = get_project("t")
+    assert p is not None
+    assert p.paused is False
+    assert p.last_served_at is None
+
+
+def test_get_project_returns_none_for_unknown(isolated_state_db: Path) -> None:
+    assert get_project("nope") is None
+
+
+def test_set_project_paused_round_trip(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    set_project_paused("t", True)
+    assert get_project("t").paused is True  # type: ignore[union-attr]
+    set_project_paused("t", False)
+    assert get_project("t").paused is False  # type: ignore[union-attr]
+
+
+def test_set_project_paused_raises_when_missing(isolated_state_db: Path) -> None:
+    with pytest.raises(StateError, match="not found"):
+        set_project_paused("nope", True)
+
+
+def test_set_project_last_served_persists(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    set_project_last_served("t", "2026-05-04T10:00:00+00:00")
+    p = get_project("t")
+    assert p is not None and p.last_served_at == "2026-05-04T10:00:00+00:00"
 
 
 # ---------- issues ----------
@@ -234,6 +275,72 @@ def test_latest_dispatch_returns_most_recent(isolated_state_db: Path) -> None:
     assert row is not None
     assert row.id == did2
     assert row.stage == "test-writer"
+
+
+def test_dispatches_for_issue_orders_desc(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    record_dispatch(project="t", issue=1, stage="plan-exec", started_at="2026-05-01T10:00:00+00:00")
+    record_dispatch(project="t", issue=1, stage="plan-exec", started_at="2026-05-02T10:00:00+00:00")
+    record_dispatch(project="t", issue=2, stage="plan-exec", started_at="2026-05-03T10:00:00+00:00")
+
+    rows = dispatches_for_issue("t", 1)
+    assert len(rows) == 2
+    assert rows[0].started_at > rows[1].started_at
+
+
+def test_consecutive_failures_zero_when_no_dispatches(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    assert consecutive_failures("t", 1) == 0
+
+
+def test_consecutive_failures_counts_until_success(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    # success → fail → fail (newest first)
+    a = record_dispatch(project="t", issue=1, stage="plan-exec", started_at="2026-05-01T10:00:00+00:00")
+    complete_dispatch(a, exit_code=0)
+    b = record_dispatch(project="t", issue=1, stage="plan-exec", started_at="2026-05-02T10:00:00+00:00")
+    complete_dispatch(b, exit_code=1)
+    c = record_dispatch(project="t", issue=1, stage="plan-exec", started_at="2026-05-03T10:00:00+00:00")
+    complete_dispatch(c, exit_code=1)
+
+    assert consecutive_failures("t", 1) == 2
+
+
+def test_consecutive_failures_zero_when_last_succeeded(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    a = record_dispatch(project="t", issue=1, stage="plan-exec", started_at="2026-05-01T10:00:00+00:00")
+    complete_dispatch(a, exit_code=1)
+    b = record_dispatch(project="t", issue=1, stage="plan-exec", started_at="2026-05-02T10:00:00+00:00")
+    complete_dispatch(b, exit_code=0)
+
+    assert consecutive_failures("t", 1) == 0
+
+
+def test_consecutive_failures_skips_running(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    # in-progress dispatch (no exit_code yet) shouldn't count
+    record_dispatch(project="t", issue=1, stage="plan-exec", started_at="2026-05-03T10:00:00+00:00")
+    assert consecutive_failures("t", 1) == 0
+
+
+def test_upsert_issue_records_author_and_created_at(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    upsert_issue(
+        project="t", number=1, author="alice", created_at="2026-05-01T10:00:00+00:00",
+    )
+    row = get_issue("t", 1)
+    assert row is not None
+    assert row.author == "alice"
+    assert row.created_at == "2026-05-01T10:00:00+00:00"
+
+
+def test_upsert_issue_preserves_created_at_on_update(isolated_state_db: Path) -> None:
+    """Upsert with new created_at must NOT overwrite the original."""
+    upsert_project(name="t", path="/p", repo="me/t")
+    upsert_issue(project="t", number=1, created_at="2026-05-01T10:00:00+00:00")
+    upsert_issue(project="t", number=1, created_at="2026-99-99T99:99:99+00:00")
+    row = get_issue("t", 1)
+    assert row is not None and row.created_at == "2026-05-01T10:00:00+00:00"
 
 
 def test_recent_dispatches_orders_desc(isolated_state_db: Path) -> None:

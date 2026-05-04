@@ -91,7 +91,25 @@ def sync(
 @app.command()
 def tick() -> None:
     """One-shot poll-and-dispatch (debug)."""
-    _stub("tick")
+    from fabric.dispatcher import Dispatcher
+    from fabric.scheduler import Scheduler
+    from fabric.state import init_db
+
+    init_db()
+    scheduler = Scheduler(dispatcher=Dispatcher())
+    result = asyncio.run(scheduler.tick())
+
+    if result.skipped_reason:
+        typer.echo(f"tick: skipped — {result.skipped_reason}")
+        return
+    if result.winner is None:
+        typer.echo(f"tick: no actionable issues (polled {result.polled_projects} project(s))")
+        return
+    w = result.winner
+    typer.echo(
+        f"tick: dispatched {w.project}#{w.issue} ({w.stage}) "
+        f"id={w.dispatch_id} exit={w.exit_code}"
+    )
 
 
 @app.command()
@@ -134,19 +152,70 @@ def dispatch(
 @app.command()
 def status() -> None:
     """Text dump of current queue state."""
-    _stub("status")
+    from fabric.state import (
+        get_setting,
+        init_db,
+        list_issues,
+        list_projects,
+        recent_dispatches,
+    )
+
+    init_db()
+    paused = get_setting("paused") == "1"
+    reason = get_setting("paused_reason") or ""
+    pause_line = "paused: yes" if paused else "paused: no"
+    if paused and reason:
+        pause_line += f" — {reason}"
+    typer.echo(pause_line)
+
+    projects = list_projects()
+    if not projects:
+        typer.echo("(no registered projects)")
+    else:
+        typer.echo("")
+        typer.echo("Projects:")
+        for p in projects:
+            issues = list_issues(p.name)
+            actionable = [i for i in issues if i.state_label and i.state_label.startswith("state:")]
+            tag = " [paused]" if p.paused else ""
+            typer.echo(f"  {p.name}{tag}: {len(actionable)} issue(s) tracked")
+
+    typer.echo("")
+    typer.echo("Recent dispatches:")
+    rows = recent_dispatches(limit=5)
+    if not rows:
+        typer.echo("  (none)")
+    for d in rows:
+        ended = d.ended_at or "running"
+        typer.echo(
+            f"  {d.started_at}  {d.project}#{d.issue}  {d.stage}  "
+            f"exit={d.exit_code}  ended={ended}"
+        )
 
 
 @app.command()
 def pause(reason: str = typer.Option("", "--reason", help="Pause reason recorded in state.")) -> None:
     """Set the global pause flag."""
-    _stub("pause")
+    from fabric.state import delete_setting, init_db, set_setting
+
+    init_db()
+    set_setting("paused", "1")
+    if reason:
+        set_setting("paused_reason", reason)
+    else:
+        delete_setting("paused_reason")
+    typer.echo(f"fabric: paused" + (f" ({reason})" if reason else ""))
 
 
 @app.command()
 def resume() -> None:
     """Clear the global pause flag."""
-    _stub("resume")
+    from fabric.state import delete_setting, init_db, set_setting
+
+    init_db()
+    set_setting("paused", "0")
+    delete_setting("paused_reason")
+    typer.echo("fabric: resumed")
 
 
 @app.command()
