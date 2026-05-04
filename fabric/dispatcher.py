@@ -285,13 +285,22 @@ class Dispatcher:
         )
 
     def _build_argv(self, *, model: str, project_path: str, stage: str, issue: int) -> list[str]:
+        # `--add-dir <directories...>` is variadic, so the prompt must sit
+        # behind a `--` separator — otherwise `claude` swallows it as
+        # another directory and aborts with "Input must be provided …".
+        # `bypassPermissions` is required for unattended dispatch: without
+        # it, every tool call blocks on a TTY-less permission prompt and
+        # the run produces no output.
         return [
             "claude",
             "-p",
             "--model",
             model,
+            "--permission-mode",
+            "bypassPermissions",
             "--add-dir",
             project_path,
+            "--",
             f"Run the {stage} skill on issue #{issue}.",
         ]
 
