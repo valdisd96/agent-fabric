@@ -84,9 +84,27 @@ sudo apt-get update && sudo apt-get install -y gh
 
 `claude` (Anthropic Claude Code CLI): follow
 https://docs.claude.com/en/docs/claude-code — Linux install instructions
-change occasionally, so re-read rather than caching a stale command. The
-binary must end up on `$PATH` for the `fabric` system user (typically
-`/usr/local/bin/claude` works).
+change occasionally, so re-read rather than caching a stale command.
+
+**Critical** — the official curl|sh installer drops the binary at
+`~/.local/share/claude/versions/<v>` (under `$HOME`). The systemd unit
+sets `ProtectHome=true`, which makes `/root/*` and `/home/*`
+**invisible** to the service. A naive `ln -s ~/.local/share/claude/...
+/usr/local/bin/claude` resolves to a hidden path and every dispatch
+fails at exec time with no useful log.
+
+Relocate the binary outside `$HOME` and symlink:
+
+```bash
+sudo install -d -m 0755 /usr/local/share/claude
+V=$(claude --version | awk '{print $1}')        # e.g. 2.1.126
+sudo cp "$(readlink -f "$(command -v claude)")" /usr/local/share/claude/claude-$V
+sudo chmod 0755 /usr/local/share/claude/claude-$V
+sudo ln -sfn /usr/local/share/claude/claude-$V /usr/local/bin/claude
+```
+
+`scripts/install-systemd.sh` warns if it detects `claude` resolving to
+`/root/*` or `/home/*`, so you'll catch this if you skip the relocation.
 
 Verify both:
 
@@ -122,10 +140,15 @@ sudo bash /srv/agent-fabric/scripts/install-systemd.sh
 The script is idempotent. It creates:
 
 - system user `fabric` with `$HOME=/var/lib/fabric`, shell `/usr/sbin/nologin`
+- `/srv/projects` (mode 0750, owned by `fabric`) — managed-repo clones land here
 - `/etc/fabric/env` with stub values, mode 0600, owned by `fabric`
 - `/etc/systemd/system/fabric.service` with the hardening flags
   (`ProtectSystem=full`, `ProtectHome=true`, `PrivateTmp=true`,
   `NoNewPrivileges=true`, `ReadWritePaths=$FABRIC_HOME`)
+
+It also prints a warning if `claude` resolves to a path under `$HOME`
+(see Step 2 caveat) — heed it before continuing, or every dispatch
+will silently fail under the running unit.
 
 **Do not start the unit yet** — auth comes first, otherwise the service
 will boot and fail to dispatch because `gh`/`claude` aren't logged in.
@@ -220,14 +243,9 @@ Common first-boot failures:
 
 ## Step 8 — register the first managed project
 
-`/srv/projects` is **not** created by the installer; create it
-`fabric`-owned first:
-
-```bash
-sudo install -d -o fabric -g fabric -m 0750 /srv/projects
-```
-
-Then clone, configure, register, label, and sync — all as `fabric`:
+`/srv/projects` was created by `install-systemd.sh` (Step 4) — fabric
+owned, mode 0750. Clone, configure, register, label, and sync as
+`fabric`:
 
 **Critical:** `sudo -u` does *not* load `/etc/fabric/env`, so `FABRIC_HOME`
 is unset by default and the CLI falls back to `~/.fabric/projects.yaml`
