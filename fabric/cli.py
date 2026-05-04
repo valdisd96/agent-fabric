@@ -319,6 +319,29 @@ def setup_labels(
     )
 
 
+def _configure_root_logger(env: dict[str, str] | None = None) -> str:
+    """Install a stderr handler on the root logger so `fabric.*` INFO/WARNING
+    lines reach systemd's journal. Without this, those loggers fall back to
+    `logging.lastResort` (stderr at WARNING), and uvicorn's own handler
+    is the only thing journalctl ever sees — making dispatch activity
+    invisible.
+
+    Returns the configured level name. Honors `FABRIC_LOG_LEVEL` so
+    `FABRIC_LOG_LEVEL=DEBUG systemctl restart fabric` works for ad-hoc
+    troubleshooting."""
+    import logging
+    import os
+
+    env_map = os.environ if env is None else env
+    level = env_map.get("FABRIC_LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
+    return level
+
+
 @app.command()
 def server(
     host: str = typer.Option("127.0.0.1", "--host", envvar="FABRIC_HOST"),
@@ -334,6 +357,7 @@ def server(
     from fabric.server import create_app
     from fabric.state import init_db
 
+    _configure_root_logger()
     init_db()
     dispatcher = Dispatcher()
     scheduler = Scheduler(dispatcher=dispatcher)
