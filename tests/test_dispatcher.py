@@ -208,6 +208,50 @@ def test_dispatch_propagates_nonzero_exit(
     assert latest is not None and latest.exit_code == 2
 
 
+def test_dispatch_logs_start_and_end_at_info(
+    isolated_state_db: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """journalctl -u fabric should narrate every dispatch — silence on a
+    successful tick is fine, but a dispatch landing must produce visible
+    log lines. Otherwise the operator has no way to tell from the journal
+    alone whether anything happened."""
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    d = Dispatcher(spawner=FakeSpawner(lines=["ok"], exit_code=0))
+
+    with caplog.at_level("INFO", logger="fabric.dispatcher"):
+        _aiorun(d.dispatch("teach-me-eng-bot", 7, "plan-exec"))
+
+    starts = [r for r in caplog.records if "dispatch start" in r.message]
+    ends = [r for r in caplog.records if "dispatch end" in r.message]
+    assert len(starts) == 1, [r.message for r in caplog.records]
+    assert len(ends) == 1
+    assert "issue=7" in starts[0].message
+    assert "stage=plan-exec" in starts[0].message
+    assert "exit=0" in ends[0].message
+
+
+def test_dispatch_logs_failure_at_warning(
+    isolated_state_db: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Non-zero exits should hit WARNING and include the log path so the
+    operator can jump straight to the per-dispatch transcript."""
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    d = Dispatcher(spawner=FakeSpawner(lines=["boom"], exit_code=1))
+
+    with caplog.at_level("INFO", logger="fabric.dispatcher"):
+        _aiorun(d.dispatch("teach-me-eng-bot", 1, "plan-exec"))
+
+    failures = [
+        r for r in caplog.records
+        if r.levelname == "WARNING" and "dispatch FAILED" in r.message
+    ]
+    assert len(failures) == 1, [r.message for r in caplog.records]
+    assert "exit=1" in failures[0].message
+    assert "log=" in failures[0].message
+
+
 # ---------- error paths ----------
 
 

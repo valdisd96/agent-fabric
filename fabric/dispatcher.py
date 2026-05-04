@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,6 +26,9 @@ from fabric import github as gh
 from fabric import state
 from fabric.config import FabricConfig, load_project_config
 from fabric.registry import ProjectEntry, fabric_home, find as find_project
+
+
+log = logging.getLogger("fabric.dispatcher")
 
 
 class DispatchError(Exception):
@@ -216,6 +220,16 @@ class Dispatcher:
             triggered_by=triggered_by,
         )
 
+        log.info(
+            "dispatch start id=%d project=%s issue=%d stage=%s model=%s triggered_by=%s",
+            dispatch_id,
+            entry.name,
+            issue,
+            stage,
+            model,
+            triggered_by,
+        )
+
         await self._publish(
             {
                 "kind": "dispatch_started",
@@ -265,6 +279,30 @@ class Dispatcher:
         )
         await asyncio.to_thread(state.inc_quota, entry.name)
 
+        duration_s = (ended - started).total_seconds()
+        # Bias toward log volume on failure: success at INFO, failure at
+        # WARNING with the log path so journalctl alone tells the story.
+        if exit_code == 0:
+            log.info(
+                "dispatch end id=%d project=%s issue=%d stage=%s exit=0 duration=%.1fs",
+                dispatch_id,
+                entry.name,
+                issue,
+                stage,
+                duration_s,
+            )
+        else:
+            log.warning(
+                "dispatch FAILED id=%d project=%s issue=%d stage=%s exit=%d duration=%.1fs log=%s",
+                dispatch_id,
+                entry.name,
+                issue,
+                stage,
+                exit_code,
+                duration_s,
+                log_path,
+            )
+
         await self._publish(
             {
                 "kind": "dispatch_ended",
@@ -281,7 +319,7 @@ class Dispatcher:
             dispatch_id=dispatch_id,
             exit_code=exit_code,
             log_path=log_path,
-            duration_s=(ended - started).total_seconds(),
+            duration_s=duration_s,
         )
 
     def _build_argv(self, *, model: str, project_path: str, stage: str, issue: int) -> list[str]:
