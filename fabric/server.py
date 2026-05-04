@@ -1,0 +1,333 @@
+"""FastAPI surface — REST + WS + the 60s scheduler tick loop.
+
+Constructed via `create_app(scheduler=..., dispatcher=...)` so tests
+can wire fakes without monkey-patching. The scheduler tick lives in
+the FastAPI lifespan: kicks off once at startup, then loops on
+`asyncio.wait_for(stop_event.wait(), timeout=tick_interval_s)` so a
+shutdown wakes the sleeper instead of waiting out the full interval.
+
+No auth in this phase — single-user, local. Phase 2 adds basic auth
+behind Tailscale.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import AsyncIterator
+
+from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi.websockets import WebSocketDisconnect
+
+from fabric import api_models as am
+from fabric import github as gh
+from fabric import state
+from fabric.dispatcher import Dispatcher, DispatchError, QuotaExceeded
+from fabric.registry import find as find_project
+from fabric.scheduler import Scheduler
+
+
+log = logging.getLogger("fabric.server")
+
+
+def create_app(
+    *,
+    scheduler: Scheduler,
+    dispatcher: Dispatcher,
+    gh_runner: gh.SubprocessRunner | None = None,
+    tick_interval_s: float = 60.0,
+) -> FastAPI:
+    runner: gh.SubprocessRunner = gh_runner or gh._default_runner
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(_tick_loop(scheduler, stop_event, tick_interval_s))
+        try:
+            yield
+        finally:
+            stop_event.set()
+            await task
+
+    app = FastAPI(title="agent-fabric", lifespan=lifespan)
+    app.state.scheduler = scheduler
+    app.state.dispatcher = dispatcher
+    _wire_routes(app, dispatcher=dispatcher, gh_runner=runner)
+    return app
+
+
+async def _tick_loop(
+    scheduler: Scheduler, stop_event: asyncio.Event, interval_s: float
+) -> None:
+    while not stop_event.is_set():
+        try:
+            await scheduler.tick()
+        except Exception:
+            log.exception("scheduler tick failed")
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval_s)
+            return
+        except asyncio.TimeoutError:
+            continue
+
+
+def _issue_to_out(r: state.IssueRow) -> am.IssueSummaryOut:
+    return am.IssueSummaryOut(
+        project=r.project,
+        number=r.number,
+        state_label=r.state_label,
+        type_label=r.type_label,
+        priority_label=r.priority_label,
+        area_label=r.area_label,
+        title=r.title,
+        url=r.url,
+        cycle_count=r.cycle_count,
+        author=r.author,
+        created_at=r.created_at,
+    )
+
+
+def _project_to_out(r: state.ProjectRow) -> am.ProjectOut:
+    return am.ProjectOut(
+        name=r.name,
+        path=r.path,
+        repo=r.repo,
+        fabric_version=r.fabric_version,
+        last_served_at=r.last_served_at,
+        paused=r.paused,
+    )
+
+
+def _dispatch_to_out(r: state.DispatchRow) -> am.DispatchOut:
+    return am.DispatchOut(
+        id=r.id,
+        project=r.project,
+        issue=r.issue,
+        stage=r.stage,
+        started_at=r.started_at,
+        ended_at=r.ended_at,
+        exit_code=r.exit_code,
+        log_path=r.log_path,
+        triggered_by=r.triggered_by,
+    )
+
+
+def _wire_routes(
+    app: FastAPI,
+    *,
+    dispatcher: Dispatcher,
+    gh_runner: gh.SubprocessRunner,
+) -> None:
+
+    # ---- read paths ----
+
+    @app.get("/api/projects", response_model=list[am.ProjectOut])
+    async def list_projects() -> list[am.ProjectOut]:
+        rows = await asyncio.to_thread(state.list_projects)
+        return [_project_to_out(r) for r in rows]
+
+    @app.get(
+        "/api/projects/{project}/issues", response_model=list[am.IssueSummaryOut]
+    )
+    async def project_issues(project: str) -> list[am.IssueSummaryOut]:
+        rows = await asyncio.to_thread(state.list_issues, project)
+        return [_issue_to_out(r) for r in rows]
+
+    @app.get("/api/issues", response_model=list[am.IssueSummaryOut])
+    async def all_issues() -> list[am.IssueSummaryOut]:
+        rows = await asyncio.to_thread(state.list_issues)
+        return [_issue_to_out(r) for r in rows]
+
+    @app.get(
+        "/api/issues/{project}/{number}", response_model=am.IssueSummaryOut
+    )
+    async def get_issue(project: str, number: int) -> am.IssueSummaryOut:
+        row = await asyncio.to_thread(state.get_issue, project, number)
+        if row is None:
+            raise HTTPException(404, f"issue {project}#{number} not found")
+        return _issue_to_out(row)
+
+    @app.get("/api/dispatches", response_model=list[am.DispatchOut])
+    async def list_dispatches(
+        project: str | None = None, limit: int = 50
+    ) -> list[am.DispatchOut]:
+        rows = await asyncio.to_thread(
+            state.recent_dispatches, project=project, limit=limit
+        )
+        return [_dispatch_to_out(r) for r in rows]
+
+    @app.get("/api/dispatches/{dispatch_id}/log", response_model=am.LogOut)
+    async def get_log(dispatch_id: int, tail: int | None = None) -> am.LogOut:
+        # Linear scan over recent dispatches — fine at our scale (10s/day).
+        rows = await asyncio.to_thread(state.recent_dispatches, limit=10000)
+        row = next((r for r in rows if r.id == dispatch_id), None)
+        if row is None or row.log_path is None:
+            raise HTTPException(404, f"dispatch {dispatch_id} has no log")
+        path = Path(row.log_path)
+        if not path.exists():
+            raise HTTPException(404, f"log file missing: {row.log_path}")
+        text = await asyncio.to_thread(path.read_text)
+        if tail is not None and tail > 0:
+            text = "\n".join(text.splitlines()[-tail:])
+        return am.LogOut(log_path=row.log_path, content=text)
+
+    @app.get("/api/status", response_model=am.StatusOut)
+    async def status() -> am.StatusOut:
+        paused = (await asyncio.to_thread(state.get_setting, "paused")) == "1"
+        reason = await asyncio.to_thread(state.get_setting, "paused_reason")
+        projects = await asyncio.to_thread(state.list_projects)
+        issues = await asyncio.to_thread(state.list_issues)
+        actionable = sum(
+            1
+            for i in issues
+            if i.state_label and i.state_label.startswith("state:")
+        )
+        return am.StatusOut(
+            paused=paused,
+            paused_reason=reason,
+            projects=len(projects),
+            actionable_issues=actionable,
+        )
+
+    # ---- write paths ----
+
+    @app.post(
+        "/api/issues/{project}/{number}/comment", response_model=am.CommentOut
+    )
+    async def post_comment(
+        project: str, number: int, req: am.CommentRequest
+    ) -> am.CommentOut:
+        repo = _resolve_repo(project)
+        try:
+            ref = await asyncio.to_thread(
+                gh.comment, repo, number, req.body, runner=gh_runner
+            )
+        except gh.GhError as e:
+            raise HTTPException(502, str(e)) from e
+        return am.CommentOut(url=ref.url)
+
+    @app.post("/api/issues/{project}/{number}/label", response_model=am.OkOut)
+    async def post_labels(
+        project: str, number: int, req: am.LabelRequest
+    ) -> am.OkOut:
+        repo = _resolve_repo(project)
+        try:
+            if req.add:
+                await asyncio.to_thread(
+                    gh.add_labels, repo, number, req.add, runner=gh_runner
+                )
+            if req.remove:
+                await asyncio.to_thread(
+                    gh.remove_labels, repo, number, req.remove, runner=gh_runner
+                )
+        except gh.GhError as e:
+            raise HTTPException(502, str(e)) from e
+        return am.OkOut()
+
+    @app.post(
+        "/api/issues/{project}/{number}/dispatch",
+        response_model=am.DispatchSubmittedOut,
+    )
+    async def post_dispatch(
+        project: str, number: int, req: am.DispatchRequest
+    ) -> am.DispatchSubmittedOut:
+        try:
+            result = await dispatcher.dispatch(
+                project,
+                number,
+                req.stage,
+                model=req.model,
+                triggered_by="manual:api",
+            )
+        except QuotaExceeded as e:
+            raise HTTPException(429, str(e)) from e
+        except DispatchError as e:
+            raise HTTPException(404, str(e)) from e
+        return am.DispatchSubmittedOut(
+            dispatch_id=result.dispatch_id,
+            exit_code=result.exit_code,
+            log_path=str(result.log_path),
+            duration_s=result.duration_s,
+        )
+
+    @app.post(
+        "/api/prs/{project}/{pr_number}/review", response_model=am.OkOut
+    )
+    async def post_review(
+        project: str, pr_number: int, req: am.ReviewRequest
+    ) -> am.OkOut:
+        repo = _resolve_repo(project)
+        try:
+            await asyncio.to_thread(
+                gh.review_pr,
+                repo,
+                pr_number,
+                action=req.action,
+                body=req.body,
+                runner=gh_runner,
+            )
+        except gh.GhError as e:
+            raise HTTPException(400, str(e)) from e
+        return am.OkOut()
+
+    @app.post(
+        "/api/prs/{project}/{pr_number}/merge", response_model=am.OkOut
+    )
+    async def post_merge(
+        project: str, pr_number: int, req: am.MergeRequest
+    ) -> am.OkOut:
+        repo = _resolve_repo(project)
+        try:
+            await asyncio.to_thread(
+                gh.merge_pr,
+                repo,
+                pr_number,
+                method=req.method,
+                delete_branch=req.delete_branch,
+                runner=gh_runner,
+            )
+        except gh.GhError as e:
+            raise HTTPException(400, str(e)) from e
+        return am.OkOut()
+
+    @app.post("/api/pause", response_model=am.OkOut)
+    async def pause(req: am.PauseRequest) -> am.OkOut:
+        await asyncio.to_thread(state.set_setting, "paused", "1")
+        if req.reason:
+            await asyncio.to_thread(state.set_setting, "paused_reason", req.reason)
+        else:
+            await asyncio.to_thread(state.delete_setting, "paused_reason")
+        return am.OkOut()
+
+    @app.post("/api/resume", response_model=am.OkOut)
+    async def resume() -> am.OkOut:
+        await asyncio.to_thread(state.set_setting, "paused", "0")
+        await asyncio.to_thread(state.delete_setting, "paused_reason")
+        return am.OkOut()
+
+    # ---- WebSocket ----
+
+    @app.websocket("/ws/live")
+    async def ws_live(websocket: WebSocket) -> None:
+        await websocket.accept()
+        queue = dispatcher.subscribe()
+        try:
+            while True:
+                event = await queue.get()
+                await websocket.send_json(event)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            dispatcher.unsubscribe(queue)
+
+
+def _resolve_repo(project: str) -> str:
+    entry = find_project(project)
+    if entry is None:
+        raise HTTPException(404, f"project {project!r} not registered")
+    return entry.repo
+
+
+__all__ = ["create_app"]
