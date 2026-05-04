@@ -46,8 +46,13 @@ class RenderError(Exception):
 
 
 def default_fabric_root() -> Path:
-    """Repo root containing `skill_templates/` (used when no override given)."""
-    return Path(__file__).resolve().parent.parent
+    """Directory containing `skill_templates/`.
+
+    Templates ship as package data inside `fabric/`, so the default is the
+    `fabric` package directory itself. This works identically for editable
+    installs (`pip install -e .`) and built wheels.
+    """
+    return Path(__file__).resolve().parent
 
 
 @dataclass(frozen=True)

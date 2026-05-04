@@ -33,6 +33,22 @@ Phase-1 commands are stubbed (exit code 2) until the scheduler/dispatcher land.
 
 `$FABRIC_HOME` overrides the default registry directory (`~/.fabric`); the systemd unit on the Pi sets it to `/var/lib/fabric`.
 
+## Drift CI for managed projects
+
+Each managed project should run a drift check on every PR to catch hand-edits to rendered skills.
+
+```bash
+mkdir -p .github/workflows
+cp /path/to/agent-fabric/examples/github-actions/fabric-sync-check.yml \
+   .github/workflows/fabric-sync-check.yml
+# then edit the file and replace REPLACE_WITH_AGENT_FABRIC_COMMIT_SHA
+# with the agent-fabric commit you want to pin to.
+```
+
+The workflow installs agent-fabric at the pinned SHA and runs `fabric sync . --check` against the project. A failure means someone edited a file under `.claude/skills/` directly instead of changing the template in agent-fabric — the fix is to change the template, run `fabric sync <project>` locally, and commit the regenerated files.
+
+Bump the pinned SHA intentionally to adopt fabric updates — you'll see the resulting skill diff in the same PR.
+
 ## Roadmap
 
 - **Phase 0** — extract & generalize. Skill templates, `fabric register`, `fabric sync`, per-project `.fabric/config.yaml`. Migrate teach-me-eng-bot to consume the fabric.
