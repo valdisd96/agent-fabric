@@ -7,7 +7,7 @@ name = "agent-fabric"
 version = "0.1.0"
 description = "Multi-project agent fabric — drives the plan-exec → test-writer → review-pr Claude pipeline across N repos."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "Uladzislau Vauchok" }]
 dependencies = [
