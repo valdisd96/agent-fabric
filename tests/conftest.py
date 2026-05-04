@@ -30,3 +30,11 @@ def project(tmp_path: Path) -> Path:
     fabric_dir.mkdir(parents=True)
     shutil.copy(FIXTURES / "good.yaml", fabric_dir / "config.yaml")
     return root
+
+
+@pytest.fixture
+def isolated_state_db(isolated_fabric_home: Path) -> Path:
+    """Initialize an isolated state.db under FABRIC_HOME and return its path."""
+    from fabric.state import init_db
+
+    return init_db()
