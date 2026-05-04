@@ -1,13 +1,170 @@
 ---
 name: review-pr
-description: PLACEHOLDER — real template lands in Phase 0C (#7).
-version: 0.0.1
+description: Stage 3 of the autonomous pipeline. FRESH session. Invoked headlessly by scripts/agent-review.sh against an issue at state:in-review. Reads the issue body + human Q&A comments + full PR diff (incl tests). Deliberately ignores `<!-- agent-plan v1 -->` comments — those are plan-exec's stated intent, and reviewing against intent biases the verdict toward "did the agent do what it said" instead of "does the diff solve the issue." Re-runs pytest as the merge gate. Outcomes are exactly one of three branches — APPROVE (gh pr merge --squash --delete-branch; the issue auto-closes via Closes #N), REJECT (gh pr review --request-changes with specific comments + flip issue to state:needs-rework), or BLOCK (flip to state:blocked + comment why; never merge). Block triggers are explicit in the safety checklist — secrets, CI tampering, schema risk, suspicious deps, service files, scope drift big enough to look like a different change.
+version: 1.1.0
 ---
 
-# review-pr — placeholder
+# review-pr
 
-State labels are prefixed `{{ labels.state_prefix }}`.
+Stage 3 of the issue → merged pipeline (`workflow.md`). FRESH session. You are the last line of defense before code lands on `main` — the orchestrator merges based on your verdict.
 
-Blocked paths (must not be modified):
-{% for p in safety.blocked_paths %}- `{{ p }}`
-{% endfor %}
+## Hard boundaries
+
+You MAY:
+- Read code, tests, the issue body, comments, the PR diff.
+- Run `pytest` (the merge gate).
+- `gh pr view` / `gh pr diff` / `gh pr review`.
+- `gh pr merge --squash --delete-branch` (only on APPROVE).
+- `gh issue comment` and `gh issue edit` (label flips).
+
+You MUST NOT:
+- Edit, write, or create any file outside `logs/`.
+- `git commit` or `git push` anything.
+- Open a new PR. Switch branches arbitrarily.
+- Approve when pytest is red.
+- Approve when the safety checklist trips.
+- Re-run a stage's work (you are not Stage 1 or 2).
+
+## The flow
+
+### 1. Resolve the PR for the issue
+
+```bash
+PR=$(gh pr list --search "Closes #<N>" --state open --json number -q '.[0].number // ""')
+if [[ -z "$PR" ]]; then
+    echo "no open PR found for issue #<N>" >&2
+    exit 1
+fi
+```
+
+If multiple open PRs reference the issue, that's a bug — comment on the issue, flip to `state:blocked`, and exit. Do not merge any of them.
+
+### 2. Read everything
+
+Read the issue body + human Q&A comments + PR title/body + full diff. **Filter out any comment whose body starts with `<!-- agent-plan`** — those are plan-exec's stated intent, not human Q&A. Reading them biases the review toward "did the agent do what it said it would" instead of "does the diff actually solve the issue."
+
+```bash
+gh issue view <N> --json title,body,comments \
+  --jq '{title, body, comments: [.comments[] | select((.body | startswith("<!-- agent-plan")) | not)]}'
+gh pr view "$PR" --json title,body,headRefName,baseRefName,additions,deletions,changedFiles
+gh pr diff "$PR"
+```
+
+Capture: the issue's intent (body + clarification Q&A only), what the PR claims to do (title + body), and the full diff.
+
+### 3. Switch to the PR branch and re-run pytest
+
+```bash
+BRANCH=$(gh pr view "$PR" --json headRefName -q '.headRefName')
+git fetch origin "$BRANCH"
+git checkout "$BRANCH" && git pull --ff-only
+{% if build.setup_cmd %}{{ build.setup_cmd }} && {% endif %}{{ build.test_cmd }}
+```
+
+If pytest is **red**, this is an automatic REJECT — Stage 2 should not have pushed red. Skip to step 5 (REJECT) with the failure as the rework reason.
+
+### 4. Run the safety checklist
+
+For each trigger below, scan the diff. Any single hit → BLOCK (skip to step 6). Multiple unrelated triggers → still BLOCK; one comment listing all of them.
+
+- **Secrets / credentials.** API keys, OAuth tokens, passwords, `Bearer` headers with literal values, JWT tokens, `.pem` keys, hard-coded `.env` values. Look for high-entropy strings ≥ 20 chars in non-test code, `Authorization: ` headers in code, anything matching `[A-Za-z0-9_-]{40,}` adjacent to `key`/`token`/`secret`. False positives are acceptable cost — block and let the user clear.
+- **CI / workflow tampering.** Any change under `.github/workflows/**`. New action that fetches arbitrary URLs, disables a check, alters `permissions:` block, or adds a new secret reference. Block on any non-trivial change here; tiny changes (e.g. version bump in an existing pinned action) are still worth a human eye.
+- **Schema / data-loss risk.** Changes to `db.py` that drop columns, alter primary keys, change foreign-key cascades, or modify FSRS columns (`stability`, `difficulty`, `state`, `step`, `due`, `reps`, `lapses`, `last_review`). Adding a column is fine; removing or rewriting one is not.
+- **Dependency additions.** New entries in `requirements.txt`. Verify the package name is the canonical one (no typo-squatting — e.g. `python-telegrm-bot` is wrong). Verify version pinning is present. If unfamiliar, block and ask the user to vet.
+- **Service / install scripts.** Any change to `teach-me-eng-bot.service` or `install-service.sh`. These run on the live host; humans should eyeball.
+- **Scope drift.** PR diff is materially larger than the issue body suggests, OR touches modules unrelated to the issue. Examples: issue says "fix typo in /help text" but PR refactors three modules. This is REJECT (rework, scope reduction), not BLOCK — unless the unrelated changes themselves trip a safety trigger.
+
+### 5. Run the quality checklist
+
+These are REJECT conditions (recoverable rework, not block):
+
+- **Test coverage.** New code paths in non-test files without corresponding test additions. Exception: pure docstring/comment/whitespace changes; rename of a private helper; doc-only edits.
+- **`dev-flow` compliance.** Branch prefix matches the issue's `type:*` label. New env-var added to `.env.example` and the env table in `CLAUDE.md`. No new comments that just narrate what well-named code already says.
+- **Issue scope.** PR addresses what the issue actually asked for. Cross-reference the issue body's exit criteria (if any) against the diff's behaviour.
+- **Module conventions.** Logic lives in `vocab.py`/`llm.py`/`scheduler.py`/etc., not in `bot.py`. Pure helpers don't open HTTP clients or hit SQLite — they take dependencies as arguments. (See `compute_weight`, `plan_push_times`, `_parse_sse_delta` for the pattern.)
+- **Test quality.** New tests actually exercise the new behaviour (would fail without the change). No tests that just call the function and `assert True`.
+
+### 6. Decide the outcome — exactly one of three
+
+#### APPROVE — merge
+
+```bash
+gh pr review "$PR" --approve --body "Stage 3 review passed. Merging."
+gh pr merge "$PR" --squash --delete-branch
+gh issue edit <N> --remove-label "state:in-review"
+```
+
+The squash-merge closes the issue automatically (via `Closes #<N>` in the PR body). The label removal is belt-and-braces in case GitHub flakes.
+
+After merge, print: `merged: PR #<P> for issue #<N>; branch deleted`.
+
+#### REJECT — rework cycle
+
+```bash
+gh pr review "$PR" --request-changes --body "$(cat <<'EOF'
+**Stage 3 — needs-rework**
+
+<one-paragraph summary of what's wrong>
+
+Specifics:
+- <bullet 1: file:line — what to change and why>
+- <bullet 2>
+- ...
+
+Returning to plan-exec for the next cycle.
+EOF
+)"
+
+gh issue edit <N> \
+  --remove-label "state:in-review" \
+  --add-label "state:needs-rework"
+```
+
+Print: `rework: PR #<P> bounced for issue #<N>`.
+
+#### BLOCK — needs human attention
+
+```bash
+gh issue comment <N> --body "$(cat <<'EOF'
+**Stage 3 — blocked**
+
+Reviewer halted auto-merge for the following reason(s):
+
+- <trigger 1: file:line — concrete description, e.g. "API key literal in llm.py:42">
+- <trigger 2 if any>
+
+This needs a human to decide. Once resolved, re-label to \`state:in-review\` to retry, or to \`state:needs-rework\` to send back to plan-exec.
+EOF
+)"
+
+gh issue edit <N> \
+  --remove-label "state:in-review" \
+  --add-label "state:blocked"
+```
+
+Do **not** also leave a PR review — block is for the user, not the bot. Print: `blocked: PR #<P> for issue #<N>; reason posted on issue`.
+
+### 7. Exit
+
+After whichever branch, exit. Do not loop.
+
+## How the three outcomes differ
+
+|  | APPROVE | REJECT | BLOCK |
+|---|---|---|---|
+| pytest | green | red OR green-but-flawed | green or red — orthogonal |
+| Safety checklist | clean | clean | tripped |
+| Quality checklist | clean | tripped | orthogonal |
+| Action | merge + delete branch | request-changes review + flip needs-rework | issue comment + flip blocked |
+| Pipeline next step | issue closed | plan-exec rework cycle | human |
+
+If two outcomes seem to apply (e.g. red pytest **and** secret in diff), choose **BLOCK** — it's the more conservative call, and the human resolution covers both issues.
+
+## What you must NOT do
+
+- Suggest code in a review comment when the right call is BLOCK or REJECT. You don't write code in this stage.
+- Approve a PR with red pytest "because the failure looks unrelated". Pytest is the gate; flakes are the user's problem to triage by re-running the script.
+- Re-run pytest more than once trying to get green. Flake-hunting belongs to plan-exec / test-writer, not Stage 3.
+- Leave the issue at `state:in-review` after deciding. Always flip exactly once.
+- Merge with a different strategy (`--merge` / `--rebase`). The pipeline assumes squash so each issue maps to one main commit.
+- **Read `<!-- agent-plan` comments.** Those are plan-exec's stated intent. Reviewing against intent rather than the diff biases the verdict — the reviewer's job is to judge what the code does against what the issue asked for, not to grade the implementer's plan adherence. Filter them out at the `gh issue view` step (see step 2).

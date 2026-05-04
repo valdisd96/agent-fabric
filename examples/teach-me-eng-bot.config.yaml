@@ -1,0 +1,64 @@
+# Example .fabric/config.yaml for teach-me-eng-bot.
+#
+# When this file lives at <teach-me-eng-bot>/.fabric/config.yaml,
+# `fabric sync teach-me-eng-bot` reproduces the project's current
+# .claude/skills/{plan-exec,test-writer,review-pr,clarify-issue,epic-decompose}/SKILL.md
+# byte-for-byte. dev-flow/ is project-internal and not touched by sync.
+
+project:
+  name: teach-me-eng-bot
+  repo: valdisd96/teach-me-eng-bot
+  trusted_authors: [valdisd96]
+
+build:
+  setup_cmd: "source .venv/bin/activate"
+  test_cmd: "python -m pytest -q"
+  lint_cmd: null
+
+modules:
+  - path: bot.py
+    role: "python-telegram-bot wiring + handlers + scheduler bootstrap"
+  - path: vocab.py
+    role: "vocab CRUD, mention scanning, FSRS rating, weighted-random select_word"
+  - path: scheduler.py
+    role: "push planning + APScheduler runner"
+  - path: llm.py
+    role: "Anthropic SSE wrapper + prompt assembly"
+  - path: translator.py
+    role: "EN/RU translation for /translate"
+  - path: db.py
+    role: "SQLite schema + migrations"
+  - path: config_flow.py
+    role: "/start onboarding state machine"
+  - path: prompts.py
+    role: "Anthropic prompt templates"
+  - path: sysinfo.py
+    role: "/status diagnostic output"
+
+safety:
+  blocked_paths:
+    - .github/workflows/**
+    - teach-me-eng-bot.service
+    - install-service.sh
+  destructive_db_patterns:
+    - "DROP COLUMN"
+    - "DROP TABLE"
+    - "ALTER COLUMN .* DROP"
+  notes: |
+    db.py migrations may add columns but never drop. FSRS columns
+    (stability, difficulty, state, step, due, reps, lapses, last_review)
+    are load-bearing and must not be touched.
+
+labels:
+  state_prefix: "state:"
+  type_prefix: "type:"
+  area_prefix: "area:"
+  area_labels: [bot, vocab, scheduler, llm, translator, config, db]
+
+pipeline:
+  cycle_limit: 5
+  retry_count: 3
+  retry_backoff_seconds: [60, 300, 900]
+  daily_dispatch_cap: 30
+
+fabric_version: "0.0.1"

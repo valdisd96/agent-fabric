@@ -1,12 +1,238 @@
 ---
 name: plan-exec
-description: PLACEHOLDER for {{ project.name }} — real template lands in Phase 0C (#7).
-version: 0.0.1
+description: Stage 1 of the autonomous pipeline. Runs headless from scripts/agent-plan-exec.sh on a single GitHub issue that is unlabelled (fresh) or at state:needs-planning or state:needs-rework. Reads the issue + any prior PR review comments, decides whether user input is needed (invoke clarify-issue if so), then follows dev-flow to cut a branch, post a `<!-- agent-plan v1 -->` comment that pairs intent with a behavioural spec, implement the change, smoke-test, and commit. Does NOT push, does NOT open a PR — those are Stage 2 (test-writer). Hands off by flipping the label to state:tests-pending.
+version: 1.2.0
 ---
 
-# plan-exec — placeholder
+# plan-exec
 
-Project: `{{ project.name }}` ({{ project.repo }}).
-Test command: `{{ build.test_cmd }}`.
+Stage 1 of the issue → merged pipeline (see `workflow.md`). One Claude session, plan + implement combined. Expects to be invoked headless via `scripts/agent-plan-exec.sh <issue#>` — no human is in the loop.
 
-This file is rendered by `fabric sync`. Edit `skill_templates/plan-exec/SKILL.md.j2` in the fabric, not the rendered output.
+## Hard boundaries
+
+You MAY:
+- Read code, edit code, write new files.
+- `git checkout`, `git branch`, `git commit` (locally only).
+- Run `pytest` for smoke checks.
+- Comment on the issue (`gh issue comment`).
+- Flip issue labels (`gh issue edit`).
+
+You MUST NOT:
+- `git push` — that's Stage 2 (test-writer).
+- `gh pr create` / `gh pr edit` — Stage 2.
+- `gh pr merge` — Stage 3 (reviewer).
+- `gh issue close` — happens automatically when the reviewer merges (via `Closes #N` in the PR body).
+
+## The flow
+
+### 1. Read everything
+
+```bash
+gh issue view <N> --json number,title,body,labels,author,comments
+```
+
+If the issue is at `state:needs-rework`, also fetch the PR's review comments — they're the spec for this cycle:
+
+```bash
+PR=$(gh pr list --search "Closes #<N>" --state all --json number -q '.[0].number')
+[[ -n "$PR" ]] && gh pr view "$PR" --json comments,reviews,headRefName
+```
+
+### 2. Verify state and flip to in-progress
+
+The valid starting states are:
+- **unlabelled** — fresh issue, never picked up. Treat exactly like `state:needs-planning`. The runner script accepts this as the equivalent of "fresh".
+- `state:needs-planning` — explicitly labelled fresh.
+- `state:needs-rework` — coming back from a Stage-2 bounce or Stage-3 rejection.
+
+The runner script enforces these are the only inputs; double-check anyway. Flip to in-progress:
+
+```bash
+gh issue edit <N> \
+  --remove-label "state:needs-planning,state:needs-rework" \
+  --add-label "state:in-progress"
+```
+
+`gh` silently ignores `--remove-label` for labels not present, so the same command works whether the issue was unlabelled, `state:needs-planning`, or `state:needs-rework`.
+
+### 3. Decide: clarify or proceed?
+
+Invoke `clarify-issue` only when:
+- The body is silent on a behaviour choice that **materially changes the diff** (e.g. "should the new field be nullable?").
+- Two reasonable interpretations of the body lead to different module changes.
+- The change is too large for one focused PR (~300 LOC, one area). Ask the user to split.
+- A code constraint collides with what the body asks for (existing schema, FSRS invariant, etc.).
+
+Do NOT clarify for:
+- Naming choices — pick what matches the codebase.
+- Small implementation details — make the most reasonable call.
+- Anything answerable by reading more code or `CLAUDE.md`.
+
+The bar: *would another reasonable agent make a different decision here that would survive into a different PR shape?*
+
+### 4. Branch
+
+**First cycle (`state:needs-planning`):**
+
+```bash
+git checkout main && git pull --ff-only
+git checkout -b <type>/<topic>
+```
+
+`<type>` comes from the `type:*` label (`feat` / `fix` / `chore` / `refactor`). If absent, infer from the change kind and add the label:
+
+```bash
+gh issue edit <N> --add-label "type:fix"
+```
+
+`<topic>` is a kebab-case summary of the issue title, ~3–5 words.
+
+**Rework cycle (`state:needs-rework`):**
+
+```bash
+BRANCH=$(gh pr view "$PR" --json headRefName -q '.headRefName')
+git fetch origin "$BRANCH"
+git checkout "$BRANCH" && git pull --ff-only
+```
+
+### 5. Apply missing labels
+
+The issue should carry `type:*`, `priority:*`, and ideally `area:*`. Add what's missing:
+
+- `priority:medium` is the default if absent.
+- `area:*` matches the modules you'll touch.
+
+```bash
+gh issue edit <N> --add-label "<comma,separated,labels>"
+```
+
+### 6. Post the plan + behavioural spec
+
+Before writing any code, post a single issue comment with two halves:
+
+- **Plan** — your reasoning. Stage 2 reads it for orientation; Stage 3 deliberately ignores it.
+- **Behavioral spec** — the contract Stage 2 derives every test from. Test-writer is spec-driven and is forbidden from reading function bodies, so this section is its only input. A vague spec produces vague tests; an absent spec bounces the issue back to you.
+
+The comment **must** start with the marker line `<!-- agent-plan v1 -->`. The marker is what test-writer searches for and what review-pr filters out.
+
+```bash
+gh issue comment <N> --body "$(cat <<'EOF'
+<!-- agent-plan v1 -->
+## Plan
+
+**Goal:** <one-sentence restatement of what the issue asks>
+
+**Approach:** <one paragraph: where the change lives, why this shape over alternatives>
+
+**Files to change:**
+- `<path>` — <what changes there>
+- ...
+
+**Out of scope:** <anything explicit you are NOT doing this cycle, if relevant>
+
+## Behavioral spec
+
+**Public API** (signatures and types only — no bodies):
+- `module.func(arg: Type, ...) -> ReturnType` — one-line purpose
+- raises `ExceptionType` when ...
+
+**Acceptance criteria** (numbered; tests cite these IDs):
+- AC1: <given X, when Y, then Z>
+- AC2: <invariant — never observe state where ...>
+
+**Edge cases:**
+- empty / single / many / boundary (max, off-by-one)
+- null / missing / malformed input
+- unicode, whitespace, leading-trailing
+
+**Error conditions:**
+- <input> → <exception type / failure mode>
+
+**Examples** (input → output pairs):
+- f("") → ...
+EOF
+)"
+```
+
+Length guide: Plan half ≤ 15 lines, Behavioral spec half ≤ 25 lines. A plan that reads like a transcript is useless; a spec that hand-waves is worse. Enumerate edge cases — empty / single / many / boundary / null / unicode — before writing a line of code, even if some end up not applying.
+
+**Cosmetic / refactor escape hatch.** When the diff genuinely changes no behaviour (docstring tweaks, comment fixes, whitespace, a no-op rename), replace the entire Behavioral spec block with the single line `**Behavioral spec:** none — cosmetic / refactor only.`. Test-writer treats that line as authoritative permission to skip test creation. Do not abuse this — if there is any new code path, the full spec is mandatory.
+
+On rework cycles post a *new* comment (do not edit prior ones); test-writer reads the latest, and the older plans stay as history.
+
+### 7. Implement
+
+Follow the `dev-flow` skill. Specifically:
+- Keep the diff focused on this issue's scope.
+- Match the project's module layout — `bot.py` is wiring; logic lives in `vocab.py`, `llm.py`, `scheduler.py`, etc.
+- Keep helpers pure and injectable. Test seams matter for Stage 2.
+- Update `.env.example` and the env table in `CLAUDE.md` if you add a new variable.
+- If you add, rename, or remove a slash command, update `COMMANDS` in `bot.py` (drives `/help` and Telegram's `set_my_commands`), the `HELP_TEXT` getting-started prose if user flow changes, and the `CLAUDE.md` Bot commands table — otherwise the feature is invisible in the bot UI.
+
+**Do NOT write tests yourself.** Stage 2 (test-writer) writes the tests in a fresh session. You write the implementation only. The exception: if existing tests need updating because behaviour legitimately changed, update them as part of your commit.
+
+### 8. Smoke check
+
+Before committing, prove the code at least compiles and existing tests still pass:
+
+```bash
+python -m py_compile $(git diff --name-only main -- '*.py')
+{% if build.setup_cmd %}{{ build.setup_cmd }} && {% endif %}{{ build.test_cmd }}
+```
+
+If existing tests now fail, fix the code (not the tests) until the suite is green. New-code-path coverage is Stage 2's job, not yours.
+
+### 9. Commit
+
+One focused commit. Subject ≤ 70 chars, imperative mood. Body explains the why. End the body with `Refs #<N>` (not `Closes #<N>` — Stage 2's PR carries the closer).
+
+```bash
+git add <changed-files>
+git commit -m "$(cat <<'EOF'
+<imperative subject>
+
+<one-paragraph why>
+
+Refs #<N>
+EOF
+)"
+```
+
+Don't `git add -A` or `git add .` — name the files you changed to avoid pulling in stray local artefacts.
+
+### 10. Hand off
+
+```bash
+gh issue edit <N> \
+  --remove-label "state:in-progress" \
+  --add-label "state:tests-pending"
+```
+
+Print one summary line and exit:
+
+```
+done: <branch-name> at <short-sha>, ready for test-writer
+```
+
+## Rework specifics
+
+When invoked at `state:needs-rework`:
+- The PR is already open. The branch is on origin. Make new commits, **don't amend** earlier ones — the test-writer will push them as the PR's next push.
+- Treat the reviewer's comments + the original issue body together as the spec. If they conflict, that's a `clarify-issue` case — the user resolves.
+- Don't open a new PR. The existing one picks up your commits when Stage 2 pushes.
+
+## Escalating to state:blocked
+
+You generally don't set `state:blocked` — that's reserved for the orchestrator (cycle limit) and the reviewer (safety triggers). The exception: the issue requests something genuinely impossible (referenced model/file/API doesn't exist).
+
+```bash
+gh issue comment <N> --body "Cannot proceed: <reason>"
+gh issue edit <N> --remove-label "state:in-progress" --add-label "state:blocked"
+```
+
+## What "done" looks like
+
+- A branch with one new commit on it.
+- Smoke tests pass on that commit.
+- Issue is at `state:tests-pending`.
+- No `git push`. No PR. No merge.
