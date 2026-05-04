@@ -5,6 +5,12 @@ and watching one full `state:needs-planning → merged` cycle land via
 Telegram. This replaces the earlier Pi/Tailscale plan — see DESIGN.md
 "Decision 13 — Deployment" for the rationale.
 
+> The detailed runbook (with every gotcha called out inline) lives in
+> `.claude/skills/install/SKILL.md`. Use this file for the conceptual
+> pass; use the install skill when you're actually doing it. The first
+> real run happened 2026-05-04 — see `docs/install-runs/2026-05-04.md`
+> for the post-mortem and the bugs it surfaced.
+
 ## Prerequisites
 
 - Ubuntu 24.04 (or Debian 12) VPC VM with sudo access.
@@ -121,13 +127,32 @@ Expected progression:
 
 ## Gotchas observed
 
-(Filled in after the first real run.)
+From the first real run on 2026-05-04 (full post-mortem in
+`docs/install-runs/2026-05-04.md`):
 
-- `claude login` SSH-tunnel quirks:
-- `gh` PAT scope:
-- systemd hardening blocking writes outside `$FABRIC_HOME`:
-- Log rotation under `$FABRIC_HOME/logs/`:
-- TG bot `chat_id` discovery (vs username):
+- **`claude` binary under `$HOME` collides with `ProtectHome=true`.** The
+  official installer drops it at `~/.local/share/claude/versions/<v>` —
+  the systemd unit makes that path invisible to the service, so
+  `/usr/local/bin/claude → ~/.local/share/...` resolves to a forbidden
+  path. Relocate to `/usr/local/share/claude/claude-<v>` and re-symlink.
+  `install-systemd.sh` warns if it detects this case.
+- **`sudo -u fabric` does not load `/etc/fabric/env`.** Running
+  `fabric register` without `export FABRIC_HOME=/var/lib/fabric` writes
+  the registry to `~/.fabric/projects.yaml` while the service reads
+  `/var/lib/fabric/projects.yaml`. The CLI now prints a stderr warning
+  when this divergence is detected; always set `FABRIC_HOME` in the
+  `sudo -u fabric` block (the install skill's heredoc does this).
+- **Fine-grained PATs need `Contents: Read and write` per repo to push.**
+  Read works (api + ls-remote) but `git push` fails with `denied to
+  <user>` if the PAT doesn't grant write to the specific repo.
+- **TG bot `chat_id` is numeric, not `@username`.** Discover via
+  [@userinfobot](https://t.me/userinfobot).
+- **`claude` refuses to run as root without `IS_SANDBOX=1`.** Only
+  relevant if you deviate from the canonical `User=fabric` setup
+  (e.g. for testing). Set `IS_SANDBOX=1` in `/etc/fabric/env` if so.
+- **Per-dispatch logs land at `$FABRIC_HOME/logs/<project>/<n>/<stage>-<ts>.log`.**
+  No rotation yet; cap is informal. If a project pumps out a lot of
+  dispatches, rotate manually for now.
 
 ## Useful one-liners
 
