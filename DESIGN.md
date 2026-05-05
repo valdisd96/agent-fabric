@@ -414,6 +414,7 @@ Push notifications for human-gate states + quick actions:
 | Dispatch failed (after retries) | `Retry` `Block` `Open` |
 | Daily quota at 80% | `Pause project X` `Open settings` |
 | Issue closed (PR merged or completed) | — (informational) |
+| Any other observed `state:*` transition | — (informational, includes prev→new, cycle count, attribution) |
 
 Slash commands:
 - `/queue` — text-render of cross-project queue

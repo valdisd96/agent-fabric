@@ -49,13 +49,23 @@ _PRIORITY_RANK: dict[str, int] = {
 }
 _DEFAULT_PRIORITY_RANK = _PRIORITY_RANK["priority:medium"]
 
-# States whose entry triggers a notification for the human (1F's TG bot).
-# Notification is fired only on observed CHANGES, not on first-sight, so a
-# fabric restart re-polling in-progress state doesn't spam.
+# State→kind map for transitions that already have a dedicated notification
+# kind with custom buttons in the TG bot. Anything not in this map (and not
+# `state:blocked`, which is fired by `_block_issue`) gets the catch-all
+# `state-changed` kind. Notifications fire only on observed CHANGES, not on
+# first-sight, so a fabric restart doesn't spam the human chat.
 _NOTIFY_STATE_KIND: dict[str, str] = {
     "state:clarification-needed": "clarification",
     "state:awaiting-decompose-approval": "decompose-approval",
 }
+_GENERIC_TRANSITION_KIND = "state-changed"
+# The auto-block path (`_block_issue`) fires its own enriched `blocked` /
+# `dispatch-failed` notification, so suppress the generic transition fire.
+_SUPPRESS_GENERIC_FOR_STATE: set[str] = {"state:blocked"}
+
+# Window for attributing a state change to the most-recent completed dispatch.
+# Anything beyond this is treated as an external/manual edit.
+_ATTRIBUTION_WINDOW_SECONDS = 300
 
 _DONE_STATE_LABEL = "state:done"
 _COMPLETED_NOTIF_KIND = "issue-completed"
@@ -103,6 +113,64 @@ def _label_with_prefix(labels: Iterable[gh.Label], prefix: str) -> str | None:
         if lbl.name.startswith(prefix):
             return lbl.name
     return None
+
+
+def _format_transition_body(
+    *,
+    project: str,
+    issue: int,
+    title: str | None,
+    prev_state: str,
+    new_state: str,
+    cycle_count: int,
+    cycle_limit: int,
+    priority_label: str | None,
+    type_label: str | None,
+    actor: str,
+    url: str | None,
+) -> str:
+    """One pre-rendered text block stored in `notifications.body`. The TG
+    formatter prefers this over the legacy minimal rendering. Keeping the
+    rendering at fire-time means we capture old→new state, which gets lost
+    once the issue row is upserted with the new label.
+    """
+    head = f"{project}#{issue}"
+    if title:
+        head = f"{head} — {title}"
+    meta_bits = [f"cycle {cycle_count}/{cycle_limit}"]
+    if priority_label:
+        meta_bits.append(priority_label)
+    if type_label:
+        meta_bits.append(type_label)
+    lines = [
+        head,
+        f"{prev_state} → {new_state}",
+        " · ".join(meta_bits),
+        f"by {actor}",
+    ]
+    if url:
+        lines.append(url)
+    return "\n".join(lines)
+
+
+def _attribute_change(
+    latest: state.DispatchRow | None, now: datetime
+) -> str:
+    """Best-guess attribution: which agent stage caused this state change?
+    If a dispatch ended cleanly within the attribution window, blame it.
+    Otherwise treat the change as external (someone edited a label by hand).
+    """
+    if latest is None or not latest.ended_at:
+        return "manual"
+    try:
+        ended = _parse_iso(latest.ended_at)
+    except ValueError:
+        return "manual"
+    if (now - ended).total_seconds() > _ATTRIBUTION_WINDOW_SECONDS:
+        return "manual"
+    if latest.exit_code != 0:
+        return "manual"
+    return latest.stage
 
 
 class Scheduler:
@@ -266,13 +334,33 @@ class Scheduler:
             if (
                 prev_state is not None
                 and prev_state != state_label
-                and state_label in _NOTIFY_STATE_KIND
+                and state_label not in _SUPPRESS_GENERIC_FOR_STATE
             ):
-                await asyncio.to_thread(
-                    state.add_notification,
-                    kind=_NOTIFY_STATE_KIND[state_label],
+                kind = _NOTIFY_STATE_KIND.get(state_label, _GENERIC_TRANSITION_KIND)
+                cycle_count = prev_row.cycle_count if prev_row else 0
+                latest = await asyncio.to_thread(
+                    state.latest_dispatch, entry.name, issue.number
+                )
+                actor = _attribute_change(latest, self._now())
+                body = _format_transition_body(
                     project=entry.name,
                     issue=issue.number,
+                    title=issue.title,
+                    prev_state=prev_state,
+                    new_state=state_label,
+                    cycle_count=cycle_count,
+                    cycle_limit=config.pipeline.cycle_limit,
+                    priority_label=priority_label,
+                    type_label=type_label,
+                    actor=actor,
+                    url=issue.url,
+                )
+                await asyncio.to_thread(
+                    state.add_notification,
+                    kind=kind,
+                    project=entry.name,
+                    issue=issue.number,
+                    body=body,
                 )
 
             if author not in config.project.trusted_authors:
@@ -294,6 +382,7 @@ class Scheduler:
                         f"({issue_row.cycle_count}/{config.pipeline.cycle_limit})"
                     ),
                     kind="blocked",
+                    cycle_limit=config.pipeline.cycle_limit,
                 )
                 continue
 
@@ -307,6 +396,7 @@ class Scheduler:
                     state_label,
                     reason=f"dispatch failed {failures} times",
                     kind="dispatch-failed",
+                    cycle_limit=config.pipeline.cycle_limit,
                 )
                 continue
             if failures > 0:
@@ -412,21 +502,23 @@ class Scheduler:
         *,
         reason: str,
         kind: str,
+        cycle_limit: int,
     ) -> None:
         recent = await asyncio.to_thread(
             state.dispatches_for_issue, entry.name, issue_number, limit=5
         )
-        body_lines = [f"⚠️ Auto-blocked: {reason}", "", "Recent attempts:"]
+        gh_comment_lines = [f"⚠️ Auto-blocked: {reason}", "", "Recent attempts:"]
         for d in recent:
             tail = f" log={d.log_path}" if d.log_path else ""
-            body_lines.append(
+            gh_comment_lines.append(
                 f"- {d.started_at} stage={d.stage} exit={d.exit_code}{tail}"
             )
-        body = "\n".join(body_lines)
+        gh_comment_body = "\n".join(gh_comment_lines)
 
         try:
             await asyncio.to_thread(
-                gh.comment, entry.repo, issue_number, body, runner=self._gh_runner
+                gh.comment, entry.repo, issue_number, gh_comment_body,
+                runner=self._gh_runner,
             )
             await asyncio.to_thread(
                 gh.remove_labels,
@@ -445,14 +537,31 @@ class Scheduler:
         except gh.GhError:
             pass  # best-effort — next tick can retry
 
+        prev_row = await asyncio.to_thread(state.get_issue, entry.name, issue_number)
         await asyncio.to_thread(
             state.upsert_issue,
             project=entry.name,
             number=issue_number,
             state_label="state:blocked",
         )
+        notif_body: str | None = None
+        if prev_row is not None:
+            notif_body = _format_transition_body(
+                project=entry.name,
+                issue=issue_number,
+                title=prev_row.title,
+                prev_state=current_state,
+                new_state="state:blocked",
+                cycle_count=prev_row.cycle_count,
+                cycle_limit=cycle_limit,
+                priority_label=prev_row.priority_label,
+                type_label=prev_row.type_label,
+                actor=f"system: {reason}",
+                url=prev_row.url,
+            )
         await asyncio.to_thread(
-            state.add_notification, kind=kind, project=entry.name, issue=issue_number
+            state.add_notification,
+            kind=kind, project=entry.name, issue=issue_number, body=notif_body,
         )
 
 

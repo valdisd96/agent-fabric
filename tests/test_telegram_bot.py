@@ -241,6 +241,35 @@ def test_render_issue_completed_notification() -> None:
     assert "p#7" in text
 
 
+def test_render_state_changed_uses_body_when_present() -> None:
+    body = (
+        "teach-me-eng-bot#7 — Rewrite README\n"
+        "state:in-review → state:tests-pending\n"
+        "cycle 1/8 · priority:low · type:docs\n"
+        "by review-pr\n"
+        "https://example/i/7"
+    )
+    n = state.NotificationRow(
+        id=1, kind="state-changed", project="teach-me-eng-bot", issue=7,
+        created_at="t", delivered_to=None, acknowledged_at=None, body=body,
+    )
+    text = render_notification_text(n)
+    assert "🔄 State changed" in text
+    assert "state:in-review → state:tests-pending" in text
+    assert "by review-pr" in text
+    assert "cycle 1/8" in text
+
+
+def test_render_falls_back_when_body_absent() -> None:
+    n = state.NotificationRow(
+        id=1, kind="clarification", project="p", issue=2,
+        created_at="t", delivered_to=None, acknowledged_at=None,
+    )
+    text = render_notification_text(n)
+    assert "Clarification needed" in text
+    assert "p#2" in text
+
+
 def test_notification_buttons_dispatch_failed_has_retry_and_block() -> None:
     n = state.NotificationRow(
         id=1, kind="dispatch-failed", project="p", issue=2,

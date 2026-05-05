@@ -138,11 +138,14 @@ _NOTIF_HEADERS = {
     "decompose-approval": "📋 Decompose approval",
     "quota-warning": "⚠️ Quota warning",
     "issue-completed": "✅ Issue completed",
+    "state-changed": "🔄 State changed",
 }
 
 
 def render_notification_text(n: state.NotificationRow) -> str:
     header = _NOTIF_HEADERS.get(n.kind, f"🔔 {n.kind}")
+    if n.body:
+        return f"{header}\n{n.body}"
     return f"{header}\n  {n.project}#{n.issue}"
 
 
