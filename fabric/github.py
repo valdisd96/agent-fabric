@@ -19,7 +19,7 @@ import subprocess
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 from pydantic.alias_generators import to_camel
 
 
@@ -175,7 +175,12 @@ def get_issue(
         "number,title,body,labels,author,comments,url,createdAt,state",
     ]
     raw = _run_gh_json(args, runner=runner)
-    return IssueDetail.model_validate(raw)
+    try:
+        return IssueDetail.model_validate(raw)
+    except ValidationError as e:
+        # Surface validation errors with the same `GhError` that JSON
+        # decode failures use — callers already handle this exception.
+        raise GhError(f"could not parse issue {number}: {e}") from e
 
 
 def add_labels(

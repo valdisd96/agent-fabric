@@ -101,6 +101,35 @@ def _parse_epic_parent(body: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
+# Q&A states the agent uses to park an issue. On transitions INTO these
+# states we fetch the latest agent-marker comment and embed it in the
+# notification body so the human can see the question/proposal in TG
+# without opening GitHub.
+_AGENT_QUESTION_STATES: set[str] = {
+    "state:clarification-needed",
+    "state:awaiting-decompose-approval",
+}
+
+# Marker prefix every fabric agent prepends to its question / proposal
+# comments (e.g. `<!-- agent-decompose-q v1 -->`, `<!-- agent-qualify v1 -->`,
+# `<!-- agent-decompose v1 -->`). Used to distinguish agent-authored
+# comments from human follow-ups.
+_AGENT_COMMENT_MARKER_PREFIX = "<!-- agent-"
+
+
+def _latest_agent_comment_body(comments: list[gh.IssueComment]) -> str | None:
+    """Most recent comment whose body starts with `<!-- agent-... -->`.
+    `gh issue view --json comments` returns comments in chronological
+    order; the last agent-marker comment is the freshest question or
+    proposal. Returns None if no agent-authored comment exists yet.
+    """
+    agent_authored = [
+        c for c in comments
+        if c.body.lstrip().startswith(_AGENT_COMMENT_MARKER_PREFIX)
+    ]
+    return agent_authored[-1].body if agent_authored else None
+
+
 @dataclass(frozen=True)
 class TickWinner:
     project: str
@@ -389,6 +418,22 @@ class Scheduler:
                     actor=actor,
                     url=issue.url,
                 )
+                # On Q&A transitions, embed the agent's most recent
+                # question / proposal so it lands directly in TG. The
+                # extra gh round-trip only fires when the human actually
+                # needs to read the question, not on every transition.
+                if state_label in _AGENT_QUESTION_STATES:
+                    try:
+                        detail = await asyncio.to_thread(
+                            gh.get_issue, entry.repo, issue.number,
+                            runner=self._gh_runner,
+                        )
+                    except gh.GhError:
+                        detail = None
+                    if detail is not None:
+                        agent_body = _latest_agent_comment_body(detail.comments)
+                        if agent_body:
+                            body = f"{body}\n\n{agent_body}"
                 await asyncio.to_thread(
                     state.add_notification,
                     kind=kind,
