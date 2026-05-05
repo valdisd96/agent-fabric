@@ -227,8 +227,12 @@ def test_tick_state_draft_is_ignored(base_setup: Path) -> None:
     assert res.candidates == 0
 
 
-def test_tick_state_epic_dispatches_decompose(base_setup: Path) -> None:
-    gh_runner = FakeGhRunner(list_issues_payload=[_issue_payload(1, "state:epic")])
+def test_tick_state_needs_decompose_dispatches_epic_decompose(base_setup: Path) -> None:
+    """`state:needs-decompose` (the post-rename epic entry state) routes to
+    the `epic-decompose` stage."""
+    gh_runner = FakeGhRunner(
+        list_issues_payload=[_issue_payload(1, "state:needs-decompose")]
+    )
     res = _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
     assert res.winner is not None
     assert res.winner.stage == "epic-decompose"
@@ -649,3 +653,242 @@ def test_blocked_state_does_not_double_fire(base_setup: Path) -> None:
     notifs = state.list_unacked_notifications()
     assert any(n.kind == "blocked" for n in notifs)
     assert not any(n.kind == "state-changed" for n in notifs)
+
+
+# ---------- epic coordinator (B3) ----------
+
+
+@dataclass
+class _CoordinatorRunner:
+    """Per-issue `gh issue view` payloads + sequential `gh issue list`
+    payloads. The plain FakeGhRunner returns one canned `issue_view`
+    payload for every call, which collides with the coordinator path
+    (which needs distinct payloads for the closed child and the parent).
+    """
+
+    issue_view_by_number: dict[int, dict[str, Any]] = field(default_factory=dict)
+    list_issues_payloads: list[list[dict[str, Any]]] = field(default_factory=list)
+    calls: list[list[str]] = field(default_factory=list)
+    _list_idx: int = 0
+
+    def __call__(self, args: list[str], **kwargs: Any) -> _GhRunResult:
+        self.calls.append(list(args))
+        if args[1:4] == ["issue", "list", "--repo"]:
+            payloads = self.list_issues_payloads or [[]]
+            idx = min(self._list_idx, len(payloads) - 1)
+            self._list_idx += 1
+            return _GhRunResult(stdout=json.dumps(payloads[idx]))
+        if args[1:3] == ["issue", "view"]:
+            try:
+                num = int(args[3])
+            except (IndexError, ValueError):
+                num = 0
+            payload = self.issue_view_by_number.get(num, {"comments": []})
+            return _GhRunResult(stdout=json.dumps(payload))
+        return _GhRunResult(stdout="https://example/c/1\n")
+
+
+def _epic_parent_view(
+    number: int, *, state: str = "OPEN", labels: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "number": number,
+        "title": f"Epic {number}",
+        "labels": [{"name": n} for n in (labels or ["type:epic", "state:tracking"])],
+        "author": {"login": "valdisd96"},
+        "url": f"https://example/i/{number}",
+        "createdAt": "2026-04-29T10:00:00Z",
+        "body": "Epic body",
+        "state": state,
+        "comments": [],
+    }
+
+
+def _closed_child_view(
+    number: int, parent: int, *, body: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "number": number,
+        "title": f"Child {number}",
+        "labels": [],
+        "author": {"login": "valdisd96"},
+        "url": f"https://example/i/{number}",
+        "createdAt": "2026-05-01T10:00:00Z",
+        "body": body if body is not None else f"Part of epic.\nRefs #{parent}",
+        "state": "CLOSED",
+        "comments": [],
+    }
+
+
+def _seed_tracked_issue(
+    project: str, number: int, state_label: str = "state:in-review"
+) -> None:
+    state.upsert_project(name=project, path="/p", repo="me/x")
+    state.upsert_issue(
+        project=project, number=number, state_label=state_label,
+        title=f"Issue {number}", url=f"u{number}",
+        author="valdisd96", created_at="2026-05-01T10:00:00Z",
+    )
+
+
+def test_parse_epic_parent_extracts_number() -> None:
+    """The Refs-line parser is the contract between epic-decompose's
+    file-children template and the scheduler's coordinator. Be loud about
+    it being load-bearing."""
+    from fabric.scheduler import _parse_epic_parent
+
+    assert _parse_epic_parent("Refs #42") == 42
+    assert _parse_epic_parent("Part of epic #5.\nRefs #5\n") == 5
+    assert _parse_epic_parent("REFS #7") == 7  # case-insensitive
+    assert _parse_epic_parent("see #99") is None  # bare # ref doesn't count
+    assert _parse_epic_parent("") is None
+    assert _parse_epic_parent(None) is None
+
+
+def test_advance_oldest_draft_sibling_when_child_closes(
+    base_setup: Path,
+) -> None:
+    """When a child of a `type:epic` parent closes and another sibling is
+    in `state:draft`, flip the oldest draft to `state:needs-planning` and
+    fire `epic-advanced`."""
+    _seed_tracked_issue("teach-me-eng-bot", 2, "state:in-review")
+
+    runner = _CoordinatorRunner(
+        list_issues_payloads=[
+            [],  # main poll: child #2 is no longer open
+            [   # sibling search by Refs #5
+                _issue_payload(3, "state:draft", created_at="2026-05-02T10:00:00Z"),
+                _issue_payload(4, "state:draft", created_at="2026-05-03T10:00:00Z"),
+            ],
+        ],
+        issue_view_by_number={
+            2: _closed_child_view(2, parent=5),
+            5: _epic_parent_view(5),
+        },
+    )
+    _aiorun(_make_scheduler(gh_runner=runner).tick())
+
+    # Oldest draft (#3) was flipped: --remove-label state:draft + --add-label state:needs-planning.
+    edit_three = [c for c in runner.calls if c[1:3] == ["issue", "edit"] and "3" in c]
+    assert any("--remove-label" in c and "state:draft" in c for c in edit_three)
+    assert any(
+        "--add-label" in c and "state:needs-planning" in c for c in edit_three
+    )
+    # And NOT on #4 (the newer draft).
+    edit_four = [c for c in runner.calls if c[1:3] == ["issue", "edit"] and "4" in c]
+    assert not edit_four
+
+    # Notification fired on the parent.
+    notifs = state.list_unacked_notifications()
+    advanced = [n for n in notifs if n.kind == "epic-advanced"]
+    assert len(advanced) == 1
+    assert advanced[0].issue == 5
+    assert "#3" in (advanced[0].body or "")
+
+
+def test_parent_auto_closes_when_no_drafts_left(base_setup: Path) -> None:
+    """Last child of an epic closes → no open siblings → fabric closes the
+    parent and fires `epic-completed`."""
+    _seed_tracked_issue("teach-me-eng-bot", 2, "state:in-review")
+
+    runner = _CoordinatorRunner(
+        list_issues_payloads=[
+            [],  # main poll
+            [],  # sibling search returns nothing → close parent
+        ],
+        issue_view_by_number={
+            2: _closed_child_view(2, parent=5),
+            5: _epic_parent_view(5),
+        },
+    )
+    _aiorun(_make_scheduler(gh_runner=runner).tick())
+
+    close_calls = [c for c in runner.calls if c[1:3] == ["issue", "close"]]
+    assert len(close_calls) == 1
+    assert "5" in close_calls[0]
+
+    notifs = state.list_unacked_notifications()
+    assert any(
+        n.kind == "epic-completed" and n.issue == 5 for n in notifs
+    )
+
+
+def test_no_advance_when_another_sibling_is_active(base_setup: Path) -> None:
+    """If another sibling is already non-draft (in-progress, in-review,
+    needs-planning, etc.), don't advance — its closure will trigger the
+    next advance later."""
+    _seed_tracked_issue("teach-me-eng-bot", 2, "state:in-review")
+
+    runner = _CoordinatorRunner(
+        list_issues_payloads=[
+            [],
+            [
+                _issue_payload(3, "state:in-progress"),  # active — leave alone
+                _issue_payload(4, "state:draft"),
+            ],
+        ],
+        issue_view_by_number={
+            2: _closed_child_view(2, parent=5),
+            5: _epic_parent_view(5),
+        },
+    )
+    _aiorun(_make_scheduler(gh_runner=runner).tick())
+
+    # No advance edit on #4, and parent stays open (no close call).
+    edit_four = [
+        c for c in runner.calls
+        if c[1:3] == ["issue", "edit"] and "4" in c and "--add-label" in c
+    ]
+    assert not edit_four
+    assert not any(c[1:3] == ["issue", "close"] for c in runner.calls)
+    assert all(
+        n.kind not in ("epic-advanced", "epic-completed")
+        for n in state.list_unacked_notifications()
+    )
+
+
+def test_no_advance_when_body_lacks_refs(base_setup: Path) -> None:
+    """A closed issue with no `Refs #N` in the body is just a regular
+    closure — no coordinator action."""
+    _seed_tracked_issue("teach-me-eng-bot", 2, "state:in-review")
+
+    runner = _CoordinatorRunner(
+        issue_view_by_number={
+            2: _closed_child_view(2, parent=5, body="just a regular issue"),
+        },
+    )
+    _aiorun(_make_scheduler(gh_runner=runner).tick())
+
+    # No parent fetch (no `gh issue view <parent>` call).
+    parent_views = [
+        c for c in runner.calls
+        if c[1:3] == ["issue", "view"] and len(c) > 3 and c[3] == "5"
+    ]
+    assert not parent_views
+    assert all(
+        n.kind not in ("epic-advanced", "epic-completed")
+        for n in state.list_unacked_notifications()
+    )
+
+
+def test_no_advance_when_parent_lacks_type_epic(base_setup: Path) -> None:
+    """A closed issue Refs'ing a non-epic parent (e.g. a regular bug
+    cross-referencing another bug) is a coincidence — don't act."""
+    _seed_tracked_issue("teach-me-eng-bot", 2, "state:in-review")
+
+    runner = _CoordinatorRunner(
+        list_issues_payloads=[[]],  # main poll only — no sibling search expected
+        issue_view_by_number={
+            2: _closed_child_view(2, parent=5),
+            5: _epic_parent_view(5, labels=["type:bug"]),  # not type:epic
+        },
+    )
+    _aiorun(_make_scheduler(gh_runner=runner).tick())
+
+    # No sibling search was issued (we bailed out at the type:epic check).
+    sibling_searches = [
+        c for c in runner.calls
+        if c[1:4] == ["issue", "list", "--repo"] and "--search" in c
+    ]
+    assert not sibling_searches
+    assert not any(c[1:3] == ["issue", "close"] for c in runner.calls)

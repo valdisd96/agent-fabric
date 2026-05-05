@@ -241,6 +241,32 @@ def test_render_issue_completed_notification() -> None:
     assert "p#7" in text
 
 
+def test_render_epic_advanced_notification() -> None:
+    """Fired by the B3 coordinator when the next held child gets advanced
+    to `state:needs-planning` after its predecessor closes."""
+    body = "p#5 — epic advanced\n#2 closed → #3 now state:needs-planning"
+    n = state.NotificationRow(
+        id=1, kind="epic-advanced", project="p", issue=5,
+        created_at="t", delivered_to=None, acknowledged_at=None, body=body,
+    )
+    text = render_notification_text(n)
+    assert "Epic advanced" in text
+    assert "#3 now state:needs-planning" in text
+
+
+def test_render_epic_completed_notification() -> None:
+    """Fired by the B3 coordinator when the parent auto-closes after the
+    last child closes."""
+    n = state.NotificationRow(
+        id=1, kind="epic-completed", project="p", issue=5,
+        created_at="t", delivered_to=None, acknowledged_at=None,
+        body="p#5 — epic completed (all children closed)",
+    )
+    text = render_notification_text(n)
+    assert "Epic completed" in text
+    assert "all children closed" in text
+
+
 def test_render_state_changed_uses_body_when_present() -> None:
     body = (
         "teach-me-eng-bot#7 — Rewrite README\n"

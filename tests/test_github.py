@@ -9,6 +9,7 @@ import pytest
 from fabric.github import (
     GhError,
     add_labels,
+    close_issue,
     comment,
     find_pr_for_issue,
     get_issue,
@@ -195,6 +196,27 @@ def test_comment_returns_url_and_passes_body() -> None:
     args = r.calls[0]
     body_idx = args.index("--body")
     assert args[body_idx + 1] == "hello"
+
+
+# ---------- close_issue ----------
+
+
+def test_close_issue_invokes_correct_argv() -> None:
+    r = FakeRunner()
+    r.queue()
+    close_issue("me/r", 5, runner=r)
+    args = r.calls[0]
+    assert args[:6] == ["gh", "issue", "close", "5", "--repo", "me/r"]
+    assert "--comment" not in args
+
+
+def test_close_issue_with_comment_body_passes_flag() -> None:
+    r = FakeRunner()
+    r.queue()
+    close_issue("me/r", 5, comment_body="all done", runner=r)
+    args = r.calls[0]
+    body_idx = args.index("--comment")
+    assert args[body_idx + 1] == "all done"
 
 
 # ---------- find_pr_for_issue ----------

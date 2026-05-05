@@ -223,6 +223,20 @@ def comment(
     return CommentRef(url=out.strip())
 
 
+def close_issue(
+    repo: str,
+    number: int,
+    *,
+    comment_body: str | None = None,
+    runner: SubprocessRunner = _default_runner,
+) -> None:
+    """Close `repo#number`, optionally posting a closing comment in one call."""
+    args = ["issue", "close", str(number), "--repo", repo]
+    if comment_body is not None:
+        args += ["--comment", comment_body]
+    _run_gh(args, runner=runner)
+
+
 _ISSUE_PR_LINK_RE = re.compile(r"#issuecomment-(\d+)$")
 
 
@@ -424,6 +438,7 @@ __all__ = [
     "PRSummary",
     "SubprocessRunner",
     "add_labels",
+    "close_issue",
     "comment",
     "create_label",
     "edit_label",

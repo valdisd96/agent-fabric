@@ -15,6 +15,7 @@ the synchronous decision layer + the CLI hook.
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -40,7 +41,7 @@ _STATE_TIER: dict[str, int] = {
     "state:needs-rework": 1,
     "state:tests-pending": 2,
     "state:needs-planning": 3,
-    "state:epic": 4,
+    "state:needs-decompose": 4,
     _UNQUALIFIED_STATE: 4,
 }
 
@@ -49,7 +50,7 @@ _STAGE_BY_STATE: dict[str, str] = {
     "state:needs-rework": "plan-exec",
     "state:tests-pending": "test-writer",
     "state:in-review": "review-pr",
-    "state:epic": "epic-decompose",
+    "state:needs-decompose": "epic-decompose",
     _UNQUALIFIED_STATE: "qualify-issue",
 }
 
@@ -80,6 +81,24 @@ _ATTRIBUTION_WINDOW_SECONDS = 300
 
 _DONE_STATE_LABEL = "state:done"
 _COMPLETED_NOTIF_KIND = "issue-completed"
+
+# Epic coordinator (B3 — hold-and-release).
+_EPIC_TYPE_LABEL = "type:epic"
+_DRAFT_STATE_LABEL = "state:draft"
+_NEEDS_PLANNING_LABEL = "state:needs-planning"
+_EPIC_ADVANCED_KIND = "epic-advanced"
+_EPIC_COMPLETED_KIND = "epic-completed"
+
+# `Refs #<N>` in a child issue's body marks the epic parent. Children are
+# filed by the `epic-decompose` skill with this exact line.
+_REFS_PARENT_RE = re.compile(r"\bRefs\s+#(\d+)\b", re.IGNORECASE)
+
+
+def _parse_epic_parent(body: str | None) -> int | None:
+    if not body:
+        return None
+    m = _REFS_PARENT_RE.search(body)
+    return int(m.group(1)) if m else None
 
 
 @dataclass(frozen=True)
@@ -481,6 +500,108 @@ class Scheduler:
                 project=entry.name,
                 issue=row.number,
             )
+            await self._advance_or_close_parent(entry, detail)
+
+    async def _advance_or_close_parent(
+        self,
+        entry: ProjectEntry,
+        closed_detail: gh.IssueDetail,
+    ) -> None:
+        """B3 coordinator. When a `type:epic` parent's child closes, advance
+        the oldest `state:draft` sibling to `state:needs-planning`. If no
+        drafts remain and no other siblings are open, close the parent.
+
+        Best-effort — gh hiccups silently no-op so a transient API blip
+        doesn't poison the tick. Next closure will re-trigger.
+        """
+        parent_num = _parse_epic_parent(closed_detail.body)
+        if parent_num is None:
+            return
+        try:
+            parent = await asyncio.to_thread(
+                gh.get_issue, entry.repo, parent_num, runner=self._gh_runner,
+            )
+        except gh.GhError:
+            return
+        if not any(lbl.name == _EPIC_TYPE_LABEL for lbl in parent.labels):
+            return
+        if parent.state.upper() == "CLOSED":
+            return
+
+        try:
+            siblings = await asyncio.to_thread(
+                gh.list_issues,
+                entry.repo,
+                label_query=f'in:body "Refs #{parent_num}"',
+                state="open",
+                runner=self._gh_runner,
+            )
+        except gh.GhError:
+            return
+
+        # Defensive: gh search may briefly include the just-closed issue.
+        siblings = [s for s in siblings if s.number != closed_detail.number]
+
+        drafts = [
+            s for s in siblings
+            if any(lbl.name == _DRAFT_STATE_LABEL for lbl in s.labels)
+        ]
+        non_drafts = [
+            s for s in siblings
+            if not any(lbl.name == _DRAFT_STATE_LABEL for lbl in s.labels)
+        ]
+
+        # Another sibling is already in flight; let it finish before
+        # advancing — its closure will trigger the next advance.
+        if non_drafts:
+            return
+
+        if drafts:
+            oldest = min(drafts, key=lambda s: s.created_at or "")
+            try:
+                await asyncio.to_thread(
+                    gh.remove_labels, entry.repo, oldest.number,
+                    [_DRAFT_STATE_LABEL], runner=self._gh_runner,
+                )
+                await asyncio.to_thread(
+                    gh.add_labels, entry.repo, oldest.number,
+                    [_NEEDS_PLANNING_LABEL], runner=self._gh_runner,
+                )
+            except gh.GhError:
+                return
+            await asyncio.to_thread(
+                state.add_notification,
+                kind=_EPIC_ADVANCED_KIND,
+                project=entry.name,
+                issue=parent_num,
+                body=(
+                    f"{entry.name}#{parent_num} — epic advanced\n"
+                    f"#{closed_detail.number} closed → "
+                    f"#{oldest.number} now {_NEEDS_PLANNING_LABEL}"
+                ),
+            )
+            return
+
+        # No active siblings, no drafts left — all children done.
+        try:
+            await asyncio.to_thread(
+                gh.close_issue,
+                entry.repo,
+                parent_num,
+                comment_body=(
+                    "Auto-closed by agent-fabric: all epic children have closed."
+                ),
+                runner=self._gh_runner,
+            )
+        except gh.GhError:
+            return
+        await asyncio.to_thread(
+            state.add_notification,
+            kind=_EPIC_COMPLETED_KIND,
+            project=entry.name,
+            issue=parent_num,
+            body=f"{entry.name}#{parent_num} — epic completed (all children closed)",
+        )
 
     def _in_backoff(
         self, failures: int, ended_at: str, backoffs: list[int]
