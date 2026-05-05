@@ -413,6 +413,7 @@ Push notifications for human-gate states + quick actions:
 | PR opened by fabric | `Approve` `Request changes` `Open` |
 | Dispatch failed (after retries) | `Retry` `Block` `Open` |
 | Daily quota at 80% | `Pause project X` `Open settings` |
+| Issue closed (PR merged or completed) | — (informational) |
 
 Slash commands:
 - `/queue` — text-render of cross-project queue

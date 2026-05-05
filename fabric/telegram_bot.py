@@ -137,6 +137,7 @@ _NOTIF_HEADERS = {
     "clarification": "❓ Clarification needed",
     "decompose-approval": "📋 Decompose approval",
     "quota-warning": "⚠️ Quota warning",
+    "issue-completed": "✅ Issue completed",
 }
 
 

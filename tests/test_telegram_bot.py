@@ -231,6 +231,16 @@ def test_render_notification_for_each_kind() -> None:
     assert "p#2" in text
 
 
+def test_render_issue_completed_notification() -> None:
+    n = state.NotificationRow(
+        id=1, kind="issue-completed", project="p", issue=7,
+        created_at="t", delivered_to=None, acknowledged_at=None,
+    )
+    text = render_notification_text(n)
+    assert "Issue completed" in text
+    assert "p#7" in text
+
+
 def test_notification_buttons_dispatch_failed_has_retry_and_block() -> None:
     n = state.NotificationRow(
         id=1, kind="dispatch-failed", project="p", issue=2,
