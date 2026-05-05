@@ -27,12 +27,21 @@ from fabric.dispatcher import Dispatcher, DispatchError, QuotaExceeded
 from fabric.registry import ProjectEntry, fabric_home, load_registry
 
 
+# Pseudo-state used internally when an open issue has no `state:*` label on
+# GitHub — routes the issue into the qualify-issue triage stage. Never
+# written back to GitHub; only lives in the scheduler/DB.
+_UNQUALIFIED_STATE = "state:unqualified"
+
 # Drain in-flight first → bring rework/tests back → start fresh planning.
+# Triage (unqualified, epic) sits below planning so it doesn't preempt
+# in-flight work.
 _STATE_TIER: dict[str, int] = {
     "state:in-review": 0,
     "state:needs-rework": 1,
     "state:tests-pending": 2,
     "state:needs-planning": 3,
+    "state:epic": 4,
+    _UNQUALIFIED_STATE: 4,
 }
 
 _STAGE_BY_STATE: dict[str, str] = {
@@ -40,6 +49,8 @@ _STAGE_BY_STATE: dict[str, str] = {
     "state:needs-rework": "plan-exec",
     "state:tests-pending": "test-writer",
     "state:in-review": "review-pr",
+    "state:epic": "epic-decompose",
+    _UNQUALIFIED_STATE: "qualify-issue",
 }
 
 _PRIORITY_RANK: dict[str, int] = {
@@ -304,8 +315,12 @@ class Scheduler:
 
         for issue in issues:
             state_label = _label_with_prefix(issue.labels, "state:")
+            # No state:* label → triage the issue via the qualify-issue
+            # stage. We tag it with an internal pseudo-state so the existing
+            # candidate/dispatch path handles it; the agent will set the
+            # real state label as part of qualification.
             if state_label is None:
-                continue
+                state_label = _UNQUALIFIED_STATE
             priority_label = _label_with_prefix(issue.labels, "priority:")
             type_label = _label_with_prefix(issue.labels, "type:")
             area_label = _label_with_prefix(issue.labels, "area:")

@@ -144,7 +144,8 @@ agent-fabric/
 │   ├── test-writer.md.j2
 │   ├── review-pr.md.j2
 │   ├── clarify-issue.md.j2
-│   └── epic-decompose.md.j2
+│   ├── epic-decompose.md.j2
+│   └── qualify-issue.md.j2
 ├── examples/
 │   └── teach-me-eng-bot.config.yaml
 ├── scripts/
@@ -172,6 +173,7 @@ my-project/
 │       ├── test-writer.md
 │       ├── review-pr.md             # rendered from the project's overlay
 │       ├── clarify-issue.md
+│       ├── qualify-issue.md
 │       └── epic-decompose.md
 ```
 
@@ -300,7 +302,7 @@ CREATE TABLE dispatches (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project TEXT NOT NULL,
   issue INTEGER NOT NULL,
-  stage TEXT NOT NULL,        -- plan-exec | test-writer | review-pr | epic-decompose
+  stage TEXT NOT NULL,        -- plan-exec | test-writer | review-pr | epic-decompose | qualify-issue
   started_at TEXT NOT NULL,
   ended_at TEXT,
   exit_code INTEGER,
@@ -362,7 +364,7 @@ When multiple projects have actionable work this tick, who goes first?
 |---|---|---|
 | D1 | Per-project round-robin within state priority | Fair; no project starves. |
 | D2 | Pure cross-project priority (any project's `priority:high in-review` beats any project's `priority:medium`) | Urgent stuff jumps repos. |
-| **D3** | **Hybrid: state priority first (in-review > rework > tests-pending > needs-planning), then `priority:*` across projects, then round-robin between projects at same level, then createdAt** | Drains in-flight; respects priority; no starvation. |
+| **D3** | **Hybrid: state priority first (in-review > rework > tests-pending > needs-planning > epic / unqualified), then `priority:*` across projects, then round-robin between projects at same level, then createdAt** | Drains in-flight; respects priority; no starvation. |
 
 **Choice: D3.** Same spirit as the in-repo plan's E3, generalized across projects. Round-robin tiebreak ensures one chatty project can't monopolise the fabric.
 

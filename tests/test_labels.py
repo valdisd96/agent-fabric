@@ -48,12 +48,25 @@ class FakeRunner:
 
 
 def test_state_labels_cover_all_pipeline_states() -> None:
-    """Every state the scheduler dispatches on must be in the canonical set."""
-    from fabric.scheduler import _STAGE_BY_STATE
+    """Every state the scheduler dispatches on must be in the canonical
+    set. The `_UNQUALIFIED_STATE` pseudo-label is exempt — it lives only
+    in fabric's DB and is never written to GitHub, so it doesn't need a
+    canonical spec."""
+    from fabric.scheduler import _STAGE_BY_STATE, _UNQUALIFIED_STATE
 
     spec_names = {s.name for s in STATE_LABELS}
     for state_label in _STAGE_BY_STATE:
+        if state_label == _UNQUALIFIED_STATE:
+            continue
         assert state_label in spec_names, f"missing canonical: {state_label}"
+
+
+def test_draft_and_epic_states_are_canonical() -> None:
+    """The triage states added with the qualify-issue stage must exist in
+    the canonical set so `setup-labels` provisions them on every project."""
+    spec_names = {s.name for s in STATE_LABELS}
+    assert "state:draft" in spec_names
+    assert "state:epic" in spec_names
 
 
 def test_priority_labels_cover_all_dispatcher_priorities() -> None:

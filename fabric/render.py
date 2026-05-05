@@ -35,6 +35,7 @@ SKILL_NAMES: tuple[str, ...] = (
     "review-pr",
     "clarify-issue",
     "epic-decompose",
+    "qualify-issue",
 )
 
 SKILL_TEMPLATE_FILENAME = "SKILL.md.j2"
