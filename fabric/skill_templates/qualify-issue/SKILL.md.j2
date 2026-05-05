@@ -1,7 +1,7 @@
 ---
 name: qualify-issue
-description: Triage stage for freshly-filed open issues that have no `state:*` label. Reads the body and routes the issue into one of four buckets — `state:draft` (ignored), `state:epic` (decompose), `state:clarification-needed` (ask the human), or `state:needs-planning` (ready for plan-exec) — by setting labels and, where appropriate, a single short comment. Read-and-label only; never edits code, never opens PRs, never touches more than one issue per dispatch.
-version: 1.0.0
+description: Triage stage for freshly-filed open issues that have no `state:*` label. Reads the body and routes the issue into one of four buckets — `state:draft` (ignored), `type:epic` + `state:needs-decompose` (decompose), `state:clarification-needed` (ask the human), or `state:needs-planning` (ready for plan-exec) — by setting labels and, where appropriate, a single short comment. Read-and-label only; never edits code, never opens PRs, never touches more than one issue per dispatch.
+version: 1.1.0
 ---
 
 # qualify-issue
@@ -81,11 +81,11 @@ Match if **any** of these are clearly true from the body:
 Most issues are **not epics.** A single feature, a bug fix, a refactor, a docs update, even a moderate cross-module change — these are plan-ready, not epics. Bias toward Branch 4. Reach for "epic" only when splitting it would be obviously wrong to do in a single PR.
 
 ```bash
-gh issue edit <N> --add-label "state:epic" --add-label "type:feature"
-gh issue comment <N> --body "Classified as \`state:epic\` — \`epic-decompose\` will pick this up to start the Q&A and propose a child-issue list."
+gh issue edit <N> --add-label "type:epic" --add-label "state:needs-decompose"
+gh issue comment <N> --body "Classified as \`type:epic\` + \`state:needs-decompose\` — \`epic-decompose\` will pick this up to start the Q&A and propose a child-issue list."
 ```
 
-Stop. Skip `type:feature` if a different `type:*` is already set.
+Stop. `type:epic` is the permanent marker on the parent (separates "what kind of issue" from "where in the pipeline"); `state:needs-decompose` is the transient routing state the scheduler keys on. Don't also set `type:feature` — `type:epic` covers it.
 
 ### Branch 4 — Plan-ready (default)
 
@@ -140,7 +140,7 @@ These are sketches based on real issue shapes — actual classification will var
 → Branch 4. `state:needs-planning` + `priority:high` + `type:bug`. A defect with a concrete reproducer and a real consequence.
 
 **Title: "Migrate auth + storage + UI to multi-tenant"** (body: lists 6 ACs spanning DB schema, OAuth, frontend, new admin pages, billing, docs)
-→ Branch 3. `state:epic` + `type:feature`. 3+ PRs, different concerns. epic-decompose takes it from here.
+→ Branch 3. `type:epic` + `state:needs-decompose`. 3+ PRs, different concerns. epic-decompose takes it from here.
 
 **Title: "Refactor"** (body: empty)
 → Branch 2. Ask: "What part of the codebase, and what's wrong with the current shape that motivates the refactor?" Cannot reasonably plan from this.

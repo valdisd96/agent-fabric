@@ -32,9 +32,9 @@ STATE_LABELS: list[LabelSpec] = [
         "Author-marked WIP — agents ignore until label is removed",
     ),
     LabelSpec(
-        "state:epic",
+        "state:needs-decompose",
         "8b5cf6",
-        "Complex feature; epic-decompose runs to split into children",
+        "Epic awaiting decomposition into child issues",
     ),
     LabelSpec("state:needs-planning", "0e8a16", "Ready for plan-exec"),
     LabelSpec("state:in-progress", "fbca04", "Agent currently working"),
@@ -52,6 +52,11 @@ STATE_LABELS: list[LabelSpec] = [
         "Decomposition awaits human approval",
     ),
     LabelSpec(
+        "state:tracking",
+        "b3e5fc",
+        "Epic with children filed; auto-closes when all children close",
+    ),
+    LabelSpec(
         "state:blocked",
         "b60205",
         "Cycle cap or repeated failure; human intervention required",
@@ -66,13 +71,16 @@ PRIORITY_LABELS: list[LabelSpec] = [
     LabelSpec("priority:low", "0e8a16", "Eligible for sonnet downgrade"),
 ]
 
-# Type — informational; not pipeline-load-bearing.
+# Type — informational; not pipeline-load-bearing. `type:epic` is the
+# permanent marker on a parent issue; the transient state lives in the
+# `state:*` family (`state:needs-decompose`, `state:tracking`, etc.).
 TYPE_LABELS: list[LabelSpec] = [
     LabelSpec("type:feature", "1d76db", ""),
     LabelSpec("type:bug", "d93f0b", ""),
     LabelSpec("type:refactor", "5319e7", ""),
     LabelSpec("type:test", "0e8a16", ""),
     LabelSpec("type:docs", "fef2c0", ""),
+    LabelSpec("type:epic", "8b5cf6", "Multi-PR initiative; child issues track the work"),
 ]
 
 

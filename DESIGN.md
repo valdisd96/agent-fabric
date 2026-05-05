@@ -312,7 +312,7 @@ CREATE TABLE dispatches (
 
 CREATE TABLE notifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind TEXT NOT NULL,         -- clarification | decompose-approval | blocked | dispatch-failed
+  kind TEXT NOT NULL,         -- clarification | decompose-approval | blocked | dispatch-failed | epic-advanced | epic-completed
   project TEXT NOT NULL,
   issue INTEGER NOT NULL,
   created_at TEXT NOT NULL,
@@ -364,7 +364,7 @@ When multiple projects have actionable work this tick, who goes first?
 |---|---|---|
 | D1 | Per-project round-robin within state priority | Fair; no project starves. |
 | D2 | Pure cross-project priority (any project's `priority:high in-review` beats any project's `priority:medium`) | Urgent stuff jumps repos. |
-| **D3** | **Hybrid: state priority first (in-review > rework > tests-pending > needs-planning > epic / unqualified), then `priority:*` across projects, then round-robin between projects at same level, then createdAt** | Drains in-flight; respects priority; no starvation. |
+| **D3** | **Hybrid: state priority first (in-review > rework > tests-pending > needs-planning > needs-decompose / unqualified), then `priority:*` across projects, then round-robin between projects at same level, then createdAt** | Drains in-flight; respects priority; no starvation. |
 
 **Choice: D3.** Same spirit as the in-repo plan's E3, generalized across projects. Round-robin tiebreak ensures one chatty project can't monopolise the fabric.
 

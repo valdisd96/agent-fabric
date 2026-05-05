@@ -139,6 +139,8 @@ _NOTIF_HEADERS = {
     "quota-warning": "⚠️ Quota warning",
     "issue-completed": "✅ Issue completed",
     "state-changed": "🔄 State changed",
+    "epic-advanced": "➡️ Epic advanced",
+    "epic-completed": "🎉 Epic completed",
 }
 
 

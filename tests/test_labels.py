@@ -61,12 +61,22 @@ def test_state_labels_cover_all_pipeline_states() -> None:
         assert state_label in spec_names, f"missing canonical: {state_label}"
 
 
-def test_draft_and_epic_states_are_canonical() -> None:
-    """The triage states added with the qualify-issue stage must exist in
-    the canonical set so `setup-labels` provisions them on every project."""
+def test_epic_flow_states_are_canonical() -> None:
+    """Triage + epic-coordinator states must exist in the canonical set so
+    `setup-labels` provisions them on every project."""
     spec_names = {s.name for s in STATE_LABELS}
     assert "state:draft" in spec_names
-    assert "state:epic" in spec_names
+    assert "state:needs-decompose" in spec_names
+    assert "state:tracking" in spec_names
+    # The legacy `state:epic` was renamed to `state:needs-decompose`.
+    assert "state:epic" not in spec_names
+
+
+def test_type_epic_is_canonical_type_label() -> None:
+    """`type:epic` is the permanent marker on a parent issue — separates
+    'what kind of issue' from 'where in the pipeline' (state:*)."""
+    type_names = {s.name for s in TYPE_LABELS}
+    assert "type:epic" in type_names
 
 
 def test_priority_labels_cover_all_dispatcher_priorities() -> None:
