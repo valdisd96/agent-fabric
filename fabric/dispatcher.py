@@ -336,6 +336,14 @@ class Dispatcher:
             model,
             "--permission-mode",
             "bypassPermissions",
+            # `stream-json --verbose` makes claude emit one JSON event per
+            # tool call / assistant message / tool result, so the log on
+            # disk is a full play-by-play (replay-as-interactive-session,
+            # like the bash scripts using `tee` did). Without --verbose,
+            # stream-json suppresses tool events.
+            "--output-format",
+            "stream-json",
+            "--verbose",
             "--add-dir",
             project_path,
             "--",

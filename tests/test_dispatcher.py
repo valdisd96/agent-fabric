@@ -132,6 +132,27 @@ def test_dispatch_argv_uses_default_model_and_project_path(
     assert any("plan-exec" in a and "issue #7" in a for a in args)
 
 
+def test_dispatch_argv_enables_stream_json_verbose_logging(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    """`--output-format stream-json --verbose` makes claude emit one JSON
+    event per tool call / assistant message / tool result. Without
+    --verbose, stream-json suppresses tool events; without stream-json,
+    we get only the final summary message (the pre-existing thin logs)."""
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    spawner = FakeSpawner()
+    d = Dispatcher(spawner=spawner)
+
+    _aiorun(d.dispatch("teach-me-eng-bot", 7, "plan-exec"))
+
+    args = spawner.calls[0]
+    assert "--output-format" in args
+    fmt_idx = args.index("--output-format")
+    assert args[fmt_idx + 1] == "stream-json"
+    assert "--verbose" in args
+
+
 def test_dispatch_argv_isolates_prompt_from_variadic_add_dir(
     isolated_state_db: Path, tmp_path: Path
 ) -> None:

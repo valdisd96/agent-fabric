@@ -237,10 +237,23 @@ def logs(
     project: str = typer.Argument(...),
     issue: int = typer.Argument(...),
     follow: bool = typer.Option(False, "--follow", "-f"),
+    pretty: bool = typer.Option(
+        False,
+        "--pretty",
+        help="Format the JSONL stream as a human-readable transcript "
+        "(tool calls, assistant text, results). Default: raw JSONL.",
+    ),
 ) -> None:
-    """Tail the latest agent log for an issue."""
+    """Tail the latest agent log for an issue.
+
+    The log is JSONL emitted by `claude -p --output-format stream-json
+    --verbose` — one event per tool call / assistant message / tool
+    result. Default output is the raw stream (greppable, parseable);
+    pass `--pretty` for a transcript view.
+    """
     import os
 
+    from fabric.log_format import format_stream
     from fabric.state import init_db, latest_dispatch
 
     init_db()
@@ -253,8 +266,13 @@ def logs(
         typer.echo(f"logs: log file missing: {d.log_path}", err=True)
         raise typer.Exit(1)
     if follow:
+        # --follow ignores --pretty: we exec tail and stream raw bytes.
+        # Pretty live-tail would need a long-running parser loop; not
+        # worth it for v1 — pipe through `jq` or run with --pretty after
+        # the dispatch ends.
         os.execvp("tail", ["tail", "-f", str(log_path)])
-    typer.echo(log_path.read_text(), nl=False)
+    text = log_path.read_text()
+    typer.echo(format_stream(text) if pretty else text, nl=False)
 
 
 @app.command(name="setup-labels")
