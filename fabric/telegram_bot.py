@@ -144,11 +144,21 @@ _NOTIF_HEADERS = {
 }
 
 
+# Telegram caps a single message at 4096 chars; we truncate at 4000 to
+# leave headroom for header lines and a suffix. Long bodies arise when
+# `decompose-approval` notifications carry the full proposed child list.
+_TG_MESSAGE_MAX = 4000
+_TRUNCATION_SUFFIX = "\n\n…(truncated — see GitHub issue for full text)"
+
+
 def render_notification_text(n: state.NotificationRow) -> str:
     header = _NOTIF_HEADERS.get(n.kind, f"🔔 {n.kind}")
-    if n.body:
-        return f"{header}\n{n.body}"
-    return f"{header}\n  {n.project}#{n.issue}"
+    body = n.body if n.body else f"  {n.project}#{n.issue}"
+    text = f"{header}\n{body}"
+    if len(text) <= _TG_MESSAGE_MAX:
+        return text
+    cutoff = _TG_MESSAGE_MAX - len(_TRUNCATION_SUFFIX)
+    return text[:cutoff] + _TRUNCATION_SUFFIX
 
 
 def notification_buttons(n: state.NotificationRow) -> list[list[dict[str, str]]]:
@@ -217,17 +227,74 @@ async def handle_callback(
     return f"unknown action: {a}"
 
 
+# Notification kinds that pause the agent waiting on a human answer.
+# Replies to these auto-flip the issue back to its resume state so the
+# next scheduler tick re-dispatches the agent — closing the "/resume
+# magic" loop that DESIGN.md Decision 7 promised.
+_RESUME_FLIP_KINDS: frozenset[str] = frozenset(
+    {"clarification", "decompose-approval"}
+)
+
+
+def _resume_state_for_reply(kind: str, type_label: str | None) -> str | None:
+    """Decide which `state:*` to flip the issue to after a human reply.
+    `decompose-approval` is always the epic-decompose loop. `clarification`
+    branches on `type:epic`: an epic-decompose Q&A resumes at
+    `state:needs-decompose`; a plan-exec / clarify-issue Q&A resumes at
+    `state:in-progress`. Returns None for kinds with no resume contract.
+    """
+    if kind == "decompose-approval":
+        return "state:needs-decompose"
+    if kind == "clarification":
+        return (
+            "state:needs-decompose" if type_label == "type:epic"
+            else "state:in-progress"
+        )
+    return None
+
+
 async def handle_reply_to_notification(
     rest: httpx.AsyncClient,
     notif: state.NotificationRow,
     body: str,
 ) -> bool:
-    """Post the reply text as a GH comment on the linked issue."""
+    """Post the reply text as a GH comment on the linked issue and, for
+    Q&A notifications, flip the issue's state label back to its resume
+    state so the next tick re-dispatches the agent. The label flip is
+    best-effort — if the API hiccups the comment still lands, and the
+    user can flip the label manually as a fallback.
+    """
     r = await rest.post(
         f"/api/issues/{notif.project}/{notif.issue}/comment",
         json={"body": body},
     )
-    return r.is_success
+    if not r.is_success:
+        return False
+    if notif.kind not in _RESUME_FLIP_KINDS:
+        return True
+
+    try:
+        detail = await rest.get(f"/api/issues/{notif.project}/{notif.issue}")
+        detail.raise_for_status()
+        data = detail.json()
+    except httpx.HTTPError:
+        return True  # comment is the primary action; flip is best-effort
+
+    resume = _resume_state_for_reply(notif.kind, data.get("type_label"))
+    cur = data.get("state_label")
+    if resume is None or resume == cur:
+        return True
+
+    payload: dict[str, list[str]] = {"add": [resume]}
+    if cur:
+        payload["remove"] = [cur]
+    try:
+        await rest.post(
+            f"/api/issues/{notif.project}/{notif.issue}/label", json=payload,
+        )
+    except httpx.HTTPError:
+        pass
+    return True
 
 
 # ---- bot wiring ----

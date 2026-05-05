@@ -354,6 +354,121 @@ def test_handle_reply_to_notification_posts_comment(
     assert any(c[1:3] == ["issue", "comment"] for c in app_setup["gh_runner"].calls)
 
 
+def test_handle_reply_flips_clarification_to_in_progress_for_non_epic(
+    isolated_state_db: Path, app_setup: dict[str, Any], rest: httpx.AsyncClient
+) -> None:
+    """Replying to a `clarification` notif on a non-epic issue flips the
+    state back to `state:in-progress` so the next tick re-dispatches
+    plan-exec / clarify-issue."""
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    state.upsert_issue(
+        project="teach-me-eng-bot", number=1,
+        state_label="state:clarification-needed",
+        type_label="type:bug",
+    )
+    nid = state.add_notification(
+        kind="clarification", project="teach-me-eng-bot", issue=1,
+    )
+    notif = state.NotificationRow(
+        id=nid, kind="clarification", project="teach-me-eng-bot", issue=1,
+        created_at="t", delivered_to=None, acknowledged_at=None,
+    )
+    _aiorun(handle_reply_to_notification(rest, notif, "answer"))
+
+    edit_calls = [
+        c for c in app_setup["gh_runner"].calls if c[1:3] == ["issue", "edit"]
+    ]
+    assert any("--add-label" in c and "state:in-progress" in c for c in edit_calls)
+    assert any(
+        "--remove-label" in c and "state:clarification-needed" in c
+        for c in edit_calls
+    )
+
+
+def test_handle_reply_flips_clarification_to_needs_decompose_for_epic(
+    isolated_state_db: Path, app_setup: dict[str, Any], rest: httpx.AsyncClient
+) -> None:
+    """On a `type:epic` issue, the resume state is `state:needs-decompose`
+    so the next tick re-dispatches `epic-decompose`, not plan-exec."""
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    state.upsert_issue(
+        project="teach-me-eng-bot", number=2,
+        state_label="state:clarification-needed",
+        type_label="type:epic",
+    )
+    notif = state.NotificationRow(
+        id=1, kind="clarification", project="teach-me-eng-bot", issue=2,
+        created_at="t", delivered_to=None, acknowledged_at=None,
+    )
+    _aiorun(handle_reply_to_notification(rest, notif, "the answer"))
+
+    edit_calls = [
+        c for c in app_setup["gh_runner"].calls if c[1:3] == ["issue", "edit"]
+    ]
+    assert any("--add-label" in c and "state:needs-decompose" in c for c in edit_calls)
+
+
+def test_handle_reply_flips_decompose_approval_to_needs_decompose(
+    isolated_state_db: Path, app_setup: dict[str, Any], rest: httpx.AsyncClient
+) -> None:
+    """`/decompose-ok` (or revision feedback) lands as a comment + flip
+    back to `state:needs-decompose` so the next tick files children."""
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    state.upsert_issue(
+        project="teach-me-eng-bot", number=3,
+        state_label="state:awaiting-decompose-approval",
+        type_label="type:epic",
+    )
+    notif = state.NotificationRow(
+        id=1, kind="decompose-approval", project="teach-me-eng-bot", issue=3,
+        created_at="t", delivered_to=None, acknowledged_at=None,
+    )
+    _aiorun(handle_reply_to_notification(rest, notif, "/decompose-ok"))
+
+    edit_calls = [
+        c for c in app_setup["gh_runner"].calls if c[1:3] == ["issue", "edit"]
+    ]
+    assert any("--add-label" in c and "state:needs-decompose" in c for c in edit_calls)
+
+
+def test_handle_reply_no_flip_for_informational_kinds(
+    isolated_state_db: Path, app_setup: dict[str, Any], rest: httpx.AsyncClient
+) -> None:
+    """Replies to non-Q&A notifications (blocked, issue-completed, etc.)
+    post the comment but never flip labels — those flows have no resume
+    contract to honor."""
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    state.upsert_issue(
+        project="teach-me-eng-bot", number=4,
+        state_label="state:blocked",
+    )
+    notif = state.NotificationRow(
+        id=1, kind="blocked", project="teach-me-eng-bot", issue=4,
+        created_at="t", delivered_to=None, acknowledged_at=None,
+    )
+    _aiorun(handle_reply_to_notification(rest, notif, "thoughts"))
+
+    edit_calls = [
+        c for c in app_setup["gh_runner"].calls if c[1:3] == ["issue", "edit"]
+    ]
+    assert not edit_calls
+
+
+def test_render_truncates_oversize_notification() -> None:
+    """A `decompose-approval` proposal can run thousands of chars; TG
+    caps at 4096. Verify we trim to the budget and append a marker."""
+    huge_body = "x" * 5000
+    n = state.NotificationRow(
+        id=1, kind="decompose-approval", project="p", issue=1,
+        created_at="t", delivered_to=None, acknowledged_at=None,
+        body=huge_body,
+    )
+    text = render_notification_text(n)
+    assert len(text) <= 4000
+    assert "truncated" in text
+    assert "Decompose approval" in text  # header still present
+
+
 # ---------- TelegramBot handler methods (with mocked context.bot) ----------
 
 

@@ -425,7 +425,7 @@ Slash commands:
 - `/projects` — list registered projects
 - `/issue <project> <n>` — quick view
 
-Inline reply: replying to a notification message that's tied to an issue posts the reply as a GH comment on that issue (and, for `clarification-needed`, flips the label to resume the pipeline — "/resume magic" promoted from the orchestrator plan's K3 to v1, since Telegram makes it natural).
+Inline reply: replying to a notification message that's tied to an issue posts the reply as a GH comment on that issue, and for Q&A notifications (`clarification`, `decompose-approval`) flips the issue's state label back to its resume state so the next scheduler tick re-dispatches the agent — "/resume magic" promoted from the orchestrator plan's K3 to v1, since Telegram makes it natural. Resume state is `state:needs-decompose` for an epic (issue carries `type:epic`) or for a `decompose-approval` reply, else `state:in-progress` (the plan-exec / clarify-issue contract). For Q&A transitions, the notification body also embeds the latest `<!-- agent-* -->` comment so the question or proposal is readable directly in the TG message — phone UX, no GH round-trip needed for short answers.
 
 ### Decision 8 — Auth
 

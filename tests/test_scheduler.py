@@ -871,6 +871,143 @@ def test_no_advance_when_body_lacks_refs(base_setup: Path) -> None:
     )
 
 
+# ---------- agent-comment in clarification body ----------
+
+
+def _issue_view_with_comments(
+    number: int,
+    state_label: str,
+    comments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "number": number,
+        "title": f"Issue {number}",
+        "url": f"https://example/i/{number}",
+        "createdAt": "2026-05-01T10:00:00Z",
+        "labels": [{"name": state_label}],
+        "author": {"login": "valdisd96"},
+        "body": "",
+        "state": "OPEN",
+        "comments": comments,
+    }
+
+
+def test_clarification_body_embeds_latest_agent_comment(
+    base_setup: Path,
+) -> None:
+    """When an issue transitions to `state:clarification-needed`, the
+    notification body should include the agent's most recent
+    `<!-- agent-* -->` comment so the human can read the question in TG."""
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(list_issues_payload=[
+            _issue_payload(8, "state:in-progress", author="randomdude"),
+        ]),
+    ).tick())
+
+    agent_question = (
+        "<!-- agent-decompose-q v1 -->\n"
+        "**Decomposition question (round 1 of up to 8)**\n\n"
+        "Should imports be one-shot or streaming?"
+    )
+    issue_view = _issue_view_with_comments(
+        8, "state:clarification-needed",
+        comments=[
+            {"body": "looks good", "author": {"login": "valdisd96"}, "url": "u"},
+            {"body": agent_question, "author": {"login": "fabric-bot"}, "url": "u"},
+        ],
+    )
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(
+            list_issues_payload=[
+                _issue_payload(8, "state:clarification-needed", author="randomdude"),
+            ],
+            issue_view_payload=issue_view,
+        ),
+    ).tick())
+
+    clar = [n for n in state.list_unacked_notifications() if n.kind == "clarification"]
+    assert len(clar) == 1
+    body = clar[0].body or ""
+    # Header still has the transition info.
+    assert "state:in-progress → state:clarification-needed" in body
+    # And the agent's question text is embedded.
+    assert "agent-decompose-q v1" in body
+    assert "Should imports be one-shot or streaming?" in body
+
+
+def test_decompose_approval_body_embeds_latest_agent_comment(
+    base_setup: Path,
+) -> None:
+    """Same for `state:awaiting-decompose-approval`: embed the proposal."""
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(list_issues_payload=[
+            _issue_payload(9, "state:in-progress", type_="type:epic",
+                           author="randomdude"),
+        ]),
+    ).tick())
+
+    proposal = (
+        "<!-- agent-decompose v1 -->\n"
+        "## Proposed decomposition\n\n"
+        "### Child 1 — add ingestion CLI"
+    )
+    issue_view = _issue_view_with_comments(
+        9, "state:awaiting-decompose-approval",
+        comments=[
+            {"body": proposal, "author": {"login": "fabric-bot"}, "url": "u"},
+        ],
+    )
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(
+            list_issues_payload=[
+                _issue_payload(9, "state:awaiting-decompose-approval",
+                               type_="type:epic", author="randomdude"),
+            ],
+            issue_view_payload=issue_view,
+        ),
+    ).tick())
+
+    da = [n for n in state.list_unacked_notifications() if n.kind == "decompose-approval"]
+    assert len(da) == 1
+    body = da[0].body or ""
+    assert "Proposed decomposition" in body
+    assert "Child 1 — add ingestion CLI" in body
+
+
+def test_clarification_body_falls_back_when_no_agent_comment(
+    base_setup: Path,
+) -> None:
+    """If no agent-marker comment exists yet (e.g. the agent just flipped
+    the label without commenting), the body still ships transition
+    metadata — no crash, no spurious agent text."""
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(list_issues_payload=[
+            _issue_payload(10, "state:in-progress", author="randomdude"),
+        ]),
+    ).tick())
+
+    issue_view = _issue_view_with_comments(
+        10, "state:clarification-needed",
+        comments=[
+            {"body": "human note", "author": {"login": "valdisd96"}, "url": "u"},
+        ],
+    )
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(
+            list_issues_payload=[
+                _issue_payload(10, "state:clarification-needed", author="randomdude"),
+            ],
+            issue_view_payload=issue_view,
+        ),
+    ).tick())
+
+    clar = [n for n in state.list_unacked_notifications() if n.kind == "clarification"]
+    assert len(clar) == 1
+    body = clar[0].body or ""
+    assert "state:in-progress → state:clarification-needed" in body
+    assert "<!-- agent-" not in body
+
+
 def test_no_advance_when_parent_lacks_type_epic(base_setup: Path) -> None:
     """A closed issue Refs'ing a non-epic parent (e.g. a regular bug
     cross-referencing another bug) is a coincidence — don't act."""
