@@ -57,6 +57,9 @@ _NOTIFY_STATE_KIND: dict[str, str] = {
     "state:awaiting-decompose-approval": "decompose-approval",
 }
 
+_DONE_STATE_LABEL = "state:done"
+_COMPLETED_NOTIF_KIND = "issue-completed"
+
 
 @dataclass(frozen=True)
 class TickWinner:
@@ -229,6 +232,7 @@ class Scheduler:
             return
 
         last_served = (proj_row.last_served_at if proj_row else None) or ""
+        observed_open: set[int] = {issue.number for issue in issues}
 
         for issue in issues:
             state_label = _label_with_prefix(issue.labels, "state:")
@@ -326,6 +330,51 @@ class Scheduler:
                     last_served_at=last_served,
                     created_at=issue.created_at or "",
                 )
+            )
+
+        await self._detect_completions(entry, observed_open)
+
+    async def _detect_completions(
+        self, entry: ProjectEntry, observed_open: set[int]
+    ) -> None:
+        """Find tracked issues that vanished from the open list and confirm
+        closure via `gh.get_issue`. Mark them `state:done` and fire one
+        `issue-completed` notification each. Closed issues lose their
+        `state:*` label, so this is the only place that detects pipeline
+        completion (PR-merge auto-close or manual close-as-completed).
+        """
+        tracked = await asyncio.to_thread(state.list_issues, entry.name)
+        for row in tracked:
+            if row.number in observed_open:
+                continue
+            if row.state_label in (None, _DONE_STATE_LABEL):
+                continue
+            try:
+                detail = await asyncio.to_thread(
+                    gh.get_issue, entry.repo, row.number, runner=self._gh_runner
+                )
+            except gh.GhError:
+                continue
+            if detail.state.upper() != "CLOSED":
+                continue
+            await asyncio.to_thread(
+                state.upsert_issue,
+                project=entry.name,
+                number=row.number,
+                state_label=_DONE_STATE_LABEL,
+                type_label=row.type_label,
+                priority_label=row.priority_label,
+                area_label=row.area_label,
+                title=row.title,
+                url=row.url,
+                author=row.author,
+                created_at=row.created_at,
+            )
+            await asyncio.to_thread(
+                state.add_notification,
+                kind=_COMPLETED_NOTIF_KIND,
+                project=entry.name,
+                issue=row.number,
             )
 
     def _in_backoff(

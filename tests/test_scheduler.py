@@ -404,3 +404,94 @@ def test_tick_dispatches_after_backoff_elapsed(base_setup: Path) -> None:
 
     assert res.winner is not None
     assert res.winner.issue == 1
+
+
+# ---------- closed-issue completion notification ----------
+
+
+def test_tick_fires_completion_notification_when_tracked_issue_closes(
+    base_setup: Path,
+) -> None:
+    """An issue we previously saw open (state:in-review) disappears from the
+    open list and `gh issue view` confirms CLOSED — fire `issue-completed`."""
+    # First tick: see the issue open with state:in-review.
+    gh_runner = FakeGhRunner(
+        list_issues_payload=[_issue_payload(7, "state:in-review")]
+    )
+    _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+    assert state.get_issue("teach-me-eng-bot", 7) is not None
+
+    # Second tick: open list no longer contains issue 7; gh issue view says CLOSED.
+    gh_runner = FakeGhRunner(
+        list_issues_payload=[],
+        issue_view_payload={
+            "number": 7, "title": "Issue 7", "labels": [],
+            "author": {"login": "valdisd96"}, "url": "https://example/i/7",
+            "createdAt": "2026-05-01T10:00:00Z", "body": "",
+            "state": "CLOSED", "comments": [],
+        },
+    )
+    _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+
+    notifs = state.list_unacked_notifications()
+    completed = [n for n in notifs if n.kind == "issue-completed"]
+    assert len(completed) == 1
+    assert completed[0].project == "teach-me-eng-bot"
+    assert completed[0].issue == 7
+
+    row = state.get_issue("teach-me-eng-bot", 7)
+    assert row is not None
+    assert row.state_label == "state:done"
+
+
+def test_tick_does_not_renotify_already_done_issues(base_setup: Path) -> None:
+    """An issue already marked state:done in the DB never gets re-fetched
+    nor re-notified, even if the open-list keeps omitting it."""
+    state.upsert_project(
+        name="teach-me-eng-bot", path=str(base_setup),
+        repo="valdisd96/teach-me-eng-bot",
+    )
+    state.upsert_issue(
+        project="teach-me-eng-bot", number=9,
+        state_label="state:done", title="old", url="u",
+        author="valdisd96", created_at="2026-04-01T10:00:00Z",
+    )
+    gh_runner = FakeGhRunner(list_issues_payload=[])
+    _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+
+    # No issue-completed notif fired and no `gh issue view` call was made.
+    assert all(
+        n.kind != "issue-completed"
+        for n in state.list_unacked_notifications()
+    )
+    assert not any(c[1:3] == ["issue", "view"] for c in gh_runner.calls)
+
+
+def test_tick_skips_notification_when_issue_still_open(
+    base_setup: Path,
+) -> None:
+    """If gh issue view reports OPEN (e.g. transient open-list pagination
+    miss), don't fire the completion notification."""
+    state.upsert_project(
+        name="teach-me-eng-bot", path=str(base_setup),
+        repo="valdisd96/teach-me-eng-bot",
+    )
+    state.upsert_issue(
+        project="teach-me-eng-bot", number=11,
+        state_label="state:in-review", title="t", url="u",
+        author="valdisd96", created_at="2026-05-01T10:00:00Z",
+    )
+    gh_runner = FakeGhRunner(
+        list_issues_payload=[],
+        issue_view_payload={
+            "number": 11, "title": "t", "labels": [],
+            "author": {"login": "valdisd96"}, "url": "u",
+            "createdAt": "2026-05-01T10:00:00Z", "body": "",
+            "state": "OPEN", "comments": [],
+        },
+    )
+    _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+    assert all(
+        n.kind != "issue-completed"
+        for n in state.list_unacked_notifications()
+    )
