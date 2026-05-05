@@ -495,3 +495,133 @@ def test_tick_skips_notification_when_issue_still_open(
         n.kind != "issue-completed"
         for n in state.list_unacked_notifications()
     )
+
+
+# ---------- generic transition notifications ----------
+
+
+def test_generic_state_changed_notification_fires_with_rich_body(
+    base_setup: Path,
+) -> None:
+    """Any prev_state→new_state transition outside the dedicated kinds
+    fires a `state-changed` notification with a multi-line body containing
+    project, issue#, transition arrow, cycle count, priority, and actor.
+
+    Untrusted author keeps the issue out of the candidate pool, so we can
+    seed dispatch history by hand without the real scheduler dispatch path
+    polluting it.
+    """
+    # Tick 1 (no `now` override): seed the prev state.
+    just_now = datetime(2026, 5, 5, 12, 0, 0, tzinfo=timezone.utc)
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(list_issues_payload=[
+            _issue_payload(3, "state:tests-pending", priority="priority:high",
+                           type_="type:feat", author="randomdude"),
+        ]),
+        now=just_now - timedelta(minutes=1),
+    ).tick())
+
+    # A completed plan-exec dispatch right before the next tick.
+    did = state.record_dispatch(
+        project="teach-me-eng-bot", issue=3, stage="plan-exec",
+        started_at=(just_now - timedelta(seconds=30)).isoformat(timespec="seconds"),
+    )
+    state.complete_dispatch(
+        did,
+        ended_at=just_now.isoformat(timespec="seconds"),
+        exit_code=0,
+    )
+
+    # Tick 2: same issue now at state:in-review.
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(list_issues_payload=[
+            _issue_payload(3, "state:in-review", priority="priority:high",
+                           type_="type:feat", author="randomdude"),
+        ]),
+        now=just_now + timedelta(seconds=10),
+    ).tick())
+
+    notifs = [n for n in state.list_unacked_notifications() if n.kind == "state-changed"]
+    assert len(notifs) == 1
+    body = notifs[0].body or ""
+    assert "teach-me-eng-bot#3" in body
+    assert "state:tests-pending → state:in-review" in body
+    assert "priority:high" in body
+    assert "type:feat" in body
+    assert "by plan-exec" in body
+    assert "cycle 0/" in body  # cycle_count starts at 0; format is N/limit
+
+
+def test_state_change_attributed_manual_when_no_recent_dispatch(
+    base_setup: Path,
+) -> None:
+    """No recent successful dispatch → attribute the change to `manual`."""
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(list_issues_payload=[
+            _issue_payload(4, "state:needs-planning", author="randomdude"),
+        ]),
+    ).tick())
+
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(list_issues_payload=[
+            _issue_payload(4, "state:tests-pending", author="randomdude"),
+        ]),
+    ).tick())
+
+    notifs = [n for n in state.list_unacked_notifications() if n.kind == "state-changed"]
+    assert len(notifs) == 1
+    assert "by manual" in (notifs[0].body or "")
+
+
+def test_clarification_kind_still_used_with_rich_body(
+    base_setup: Path,
+) -> None:
+    """Transitions to states with dedicated kinds (clarification,
+    decompose-approval) keep their kind, but now ship the rich body too."""
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(list_issues_payload=[
+            _issue_payload(5, "state:in-progress", author="randomdude"),
+        ]),
+    ).tick())
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(list_issues_payload=[
+            _issue_payload(5, "state:clarification-needed", author="randomdude"),
+        ]),
+    ).tick())
+
+    notifs = state.list_unacked_notifications()
+    clar = [n for n in notifs if n.kind == "clarification"]
+    assert len(clar) == 1
+    body = clar[0].body or ""
+    assert "state:in-progress → state:clarification-needed" in body
+    # And no duplicate state-changed kind:
+    assert not any(n.kind == "state-changed" for n in notifs)
+
+
+def test_blocked_state_does_not_double_fire(base_setup: Path) -> None:
+    """When `_block_issue` flips a label to state:blocked, the next tick
+    sees prev_state→state:blocked but must NOT fire a generic
+    state-changed on top of the dedicated `blocked` kind."""
+    # Manually seed an issue at state:in-review with cycle count over the cap.
+    state.upsert_project(
+        name="teach-me-eng-bot", path=str(base_setup),
+        repo="valdisd96/teach-me-eng-bot",
+    )
+    state.upsert_issue(
+        project="teach-me-eng-bot", number=6,
+        state_label="state:in-review", title="t", url="u",
+        author="valdisd96", created_at="2026-05-01T10:00:00Z",
+    )
+    state.set_cycle_count("teach-me-eng-bot", 6, 999)
+
+    # Tick: gh still reports it as state:in-review; the cycle-cap path
+    # in _block_issue flips it.
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(list_issues_payload=[
+            _issue_payload(6, "state:in-review", author="valdisd96"),
+        ]),
+    ).tick())
+
+    notifs = state.list_unacked_notifications()
+    assert any(n.kind == "blocked" for n in notifs)
+    assert not any(n.kind == "state-changed" for n in notifs)

@@ -78,6 +78,7 @@ class NotificationRow:
     acknowledged_at: str | None
     tg_chat_id: int | None = None
     tg_message_id: int | None = None
+    body: str | None = None
 
 
 def state_db_path() -> Path:
@@ -168,10 +169,16 @@ CREATE INDEX idx_notifications_tg
 """
 
 
+_SCHEMA_V4 = """
+ALTER TABLE notifications ADD COLUMN body TEXT;
+"""
+
+
 _MIGRATIONS: list[tuple[int, str]] = [
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
     (3, _SCHEMA_V3),
+    (4, _SCHEMA_V4),
 ]
 
 
@@ -551,11 +558,14 @@ def quota_today(project: str, *, day: str | None = None) -> int:
 # ---- notifications DAO ----
 
 
-def add_notification(*, kind: str, project: str, issue: int) -> int:
+def add_notification(
+    *, kind: str, project: str, issue: int, body: str | None = None
+) -> int:
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO notifications (kind, project, issue, created_at) VALUES (?, ?, ?, ?)",
-            (kind, project, issue, _utc_now()),
+            "INSERT INTO notifications (kind, project, issue, created_at, body) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (kind, project, issue, _utc_now(), body),
         )
         conn.commit()
         if cur.lastrowid is None:

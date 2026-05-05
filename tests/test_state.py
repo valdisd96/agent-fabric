@@ -390,6 +390,16 @@ def test_add_notification_returns_id(isolated_state_db: Path) -> None:
     assert isinstance(nid, int) and nid > 0
 
 
+def test_notification_body_round_trips(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    add_notification(
+        kind="state-changed", project="t", issue=1,
+        body="line 1\nline 2",
+    )
+    [n] = list_unacked_notifications()
+    assert n.body == "line 1\nline 2"
+
+
 def test_list_unacked_filters_acked(isolated_state_db: Path) -> None:
     upsert_project(name="t", path="/p", repo="me/t")
     a = add_notification(kind="clarification", project="t", issue=1)
