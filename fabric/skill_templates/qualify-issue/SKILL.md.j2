@@ -1,0 +1,59 @@
+---
+name: qualify-issue
+description: Triage stage for freshly-filed open issues with no `state:*` label. Reads the issue body, decides whether it is a draft, an epic, ready to plan, or needs clarification, and applies the appropriate label set so the rest of the pipeline can take over. One dispatch = one decision; never edits code or opens PRs.
+version: 0.1.0
+---
+
+# qualify-issue
+
+The first thing the fabric does to any new issue. Reads the body and routes the issue into one of four buckets by setting labels. This skill is a skeleton — the prompt content will be tuned in a follow-up against real issues.
+
+## Hard boundaries
+
+You MAY:
+- `gh issue view`, `gh issue list`, `gh issue comment`, `gh issue edit` (labels) on the issue you were dispatched on.
+- Read code to ground your understanding when classifying scope.
+
+You MUST NOT:
+- Edit code, create branches, commit, push, or open PRs. Qualification is read-and-label only.
+- Touch any issue other than the one you were dispatched on.
+- Skip setting a state label. Every dispatch must end with the issue holding exactly one `state:*` label so the next tick knows what to do.
+
+## Inputs
+
+Dispatched on an open issue with **no** `state:*` label. The fabric tags it `state:unqualified` internally, but that label does not exist on GitHub — your job is to put a real one there.
+
+## The decision tree
+
+Walk top-down — first match wins.
+
+1. **Author marks WIP / draft.** The body says "draft", "WIP", "do not work on yet", or the title is `[WIP]…` / `[draft]…`.
+   → Set `state:draft`. Add a one-line comment: `Marked as draft — agents will skip this issue. Remove the label to start.` Stop.
+
+2. **Body is too vague to classify.** No clear ask, missing the "what" or the "why", or the request is contradictory.
+   → Set `state:clarification-needed`. Post one focused question as a comment. Stop. The TG bot will ping the user; their reply re-triggers qualification on the next tick.
+
+3. **Complex feature requiring decomposition.** The work would land as multiple PRs, touches multiple modules, or the body explicitly says "epic" / "big feature" / "multi-step".
+   → Set `state:epic` (and `type:feature` if not already set). Add a one-line comment: `Classified as epic — epic-decompose will pick it up next tick to start the Q&A.` Stop.
+
+4. **Default — ready to plan.** Single-deliverable change, body has enough detail for plan-exec to draft a plan.
+   → Set `state:needs-planning`. Also set `priority:*` and `type:*` if you can infer them confidently from the body; leave them off if you can't (plan-exec or the human will tag them later). Stop.
+
+## Required label hygiene per branch
+
+| Branch | State label set | Other labels touched |
+|---|---|---|
+| 1. Draft | `state:draft` | none |
+| 2. Vague | `state:clarification-needed` | none |
+| 3. Epic | `state:epic` | `type:feature` (if missing) |
+| 4. Plan-ready | `state:needs-planning` | `priority:*`, `type:*` if confidently inferred |
+
+Never apply more than one `state:*` label.
+
+## Output format
+
+Every dispatch ends with one of:
+1. A label edit + a short comment matching the chosen branch above, OR
+2. (Default branch) a label edit only — no comment is required for the plan-ready path.
+
+Do not post analysis, decision rationale, or trace logs. Be terse. The whole skill exists to keep new issues moving without making the human read paragraphs.

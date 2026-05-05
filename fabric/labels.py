@@ -26,6 +26,16 @@ class LabelSpec:
 
 # Pipeline state — every transition the scheduler/dispatcher cares about.
 STATE_LABELS: list[LabelSpec] = [
+    LabelSpec(
+        "state:draft",
+        "cccccc",
+        "Author-marked WIP — agents ignore until label is removed",
+    ),
+    LabelSpec(
+        "state:epic",
+        "8b5cf6",
+        "Complex feature; epic-decompose runs to split into children",
+    ),
     LabelSpec("state:needs-planning", "0e8a16", "Ready for plan-exec"),
     LabelSpec("state:in-progress", "fbca04", "Agent currently working"),
     LabelSpec("state:tests-pending", "1d76db", "Plan landed; tests next"),

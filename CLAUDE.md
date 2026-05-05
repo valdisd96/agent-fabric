@@ -22,7 +22,7 @@ Conceptually identical to SCSS → CSS or `protoc` output: humans edit the sourc
 
 **Overlay mechanism.** A managed project may replace any single skill by writing its own `<project>/.fabric/skills/<name>/SKILL.md.j2`. That overlay beats the fabric default at the whole-skill level (no section-level inheritance — see DESIGN.md "Override grain"). teach-me-eng-bot has zero overlays today.
 
-**The 5 fabric-managed skills:** `plan-exec`, `test-writer`, `review-pr`, `clarify-issue`, `epic-decompose`. The list lives at `fabric/render.py::SKILL_NAMES`. `dev-flow` is intentionally project-internal — `fabric sync` does not touch it.
+**The 6 fabric-managed skills:** `plan-exec`, `test-writer`, `review-pr`, `clarify-issue`, `epic-decompose`, `qualify-issue`. The list lives at `fabric/render.py::SKILL_NAMES`. `dev-flow` is intentionally project-internal — `fabric sync` does not touch it.
 
 ## Repo layout
 
@@ -82,7 +82,7 @@ tests/
 ## Invariants
 
 - **Schema is a public contract.** `.fabric/config.yaml`'s shape is depended on by every managed project (each pins a `fabric_version`). Backwards-incompatible changes require a version bump (semver minor for additive, major for breaking), a migration note in the PR body, and an `examples/teach-me-eng-bot.config.yaml` update.
-- **Parity is byte-for-byte.** `tests/test_parity.py` renders the 5 templates against `examples/teach-me-eng-bot.config.yaml` and compares to `$TEACH_ME_ENG_BOT_PATH/.claude/skills/<name>/SKILL.md`. Any byte difference fails. Bumping a template's frontmatter `version:` is therefore a deliberate act gated by CI. Skips cleanly when `$TEACH_ME_ENG_BOT_PATH` is unset.
+- **Parity is byte-for-byte.** `tests/test_parity.py` renders the 6 templates against `examples/teach-me-eng-bot.config.yaml` and compares to `$TEACH_ME_ENG_BOT_PATH/.claude/skills/<name>/SKILL.md`. Any byte difference fails. Bumping a template's frontmatter `version:` is therefore a deliberate act gated by CI. Skips cleanly when `$TEACH_ME_ENG_BOT_PATH` is unset.
 - **Templates ship inside the package.** `fabric/skill_templates/` (NOT repo root). `default_fabric_root()` returns the package dir so editable and wheel installs behave identically. Don't move them back out.
 - **Skills are package data, not data files referenced by path.** Anything that needs to find them goes through `default_fabric_root()` or the `fabric_root` injection point — never `Path.cwd()` or repo-relative paths.
 

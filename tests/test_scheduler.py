@@ -202,12 +202,36 @@ def test_tick_per_project_paused_skips_only_that_project(
 # ---------- polling + filters ----------
 
 
-def test_tick_no_candidates_when_no_state_labels(base_setup: Path) -> None:
+def test_tick_unlabeled_issue_dispatches_qualify_stage(base_setup: Path) -> None:
+    """Open issue with no `state:*` label → qualify-issue stage dispatches.
+    The fabric uses an internal `state:unqualified` pseudo-label so the
+    issue flows through the existing candidate/dispatch machinery."""
     gh_runner = FakeGhRunner(list_issues_payload=[_issue_payload(1, state_label=None)])
+    res = _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+    assert res.winner is not None
+    assert res.winner.issue == 1
+    assert res.winner.stage == "qualify-issue"
+    # The DB row carries the pseudo-label so the next tick's transition
+    # logic can detect when qualify-issue flips it to a real state.
+    row = state.get_issue("teach-me-eng-bot", 1)
+    assert row is not None
+    assert row.state_label == "state:unqualified"
+
+
+def test_tick_state_draft_is_ignored(base_setup: Path) -> None:
+    """`state:draft` is a terminal-ignored label — never dispatched, like
+    `state:done`."""
+    gh_runner = FakeGhRunner(list_issues_payload=[_issue_payload(1, "state:draft")])
     res = _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
     assert res.winner is None
     assert res.candidates == 0
-    assert res.polled_projects == 1
+
+
+def test_tick_state_epic_dispatches_decompose(base_setup: Path) -> None:
+    gh_runner = FakeGhRunner(list_issues_payload=[_issue_payload(1, "state:epic")])
+    res = _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+    assert res.winner is not None
+    assert res.winner.stage == "epic-decompose"
 
 
 def test_tick_polls_and_upserts_issues(base_setup: Path) -> None:
