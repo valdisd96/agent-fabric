@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -65,6 +66,11 @@ _CYCLE_SENTINEL = f"<!-- agent-fabric:{_CYCLE_MARKER} -->"
 _STREAM_READER_LIMIT = 16 * 1024 * 1024
 _OVERFLOW_EXIT_CODE = -1
 _TERMINATE_GRACE_S = 5.0
+
+#: Sentinel for deploy-diagnose dispatches — not bound to a GitHub issue.
+_NO_ISSUE = 0
+#: Skill name (must match `fabric/skill_templates/deploy-diagnose/`).
+_DIAGNOSE_STAGE = "deploy-diagnose"
 
 
 async def _default_spawner(args: list[str], **kwargs: Any) -> asyncio.subprocess.Process:
@@ -121,6 +127,53 @@ class Dispatcher:
                 stage=stage,
                 model=resolved_model,
                 triggered_by=triggered_by,
+            )
+
+    async def dispatch_deploy_diagnose(
+        self, project: str, deployment_id: int, *, model: str | None = None,
+    ) -> DispatchResult:
+        """Dispatch the deploy-diagnose skill against a failed deployment.
+
+        Unlike `dispatch()`, this is not tied to a GitHub issue — the
+        diagnose's job is to *file* one. The dispatch row is recorded with
+        `issue=0` and a non-NULL `deployment_id`; the deployment row is
+        updated to point back at the dispatch via
+        `state.set_deployment_diagnose_dispatch` once the run starts.
+
+        Triggered automatically by `POST /api/projects/<n>/deploy-failures`
+        and manually by `fabric diagnose <project> <deployment-id>`.
+        """
+        entry, config = self._load_project(project)
+        await self._ensure_state_project(entry, config)
+
+        deployment = await asyncio.to_thread(state.get_deployment, deployment_id)
+        if deployment is None:
+            raise DispatchError(f"deployment {deployment_id} not found")
+        if deployment.project != project:
+            raise DispatchError(
+                f"deployment {deployment_id} belongs to project "
+                f"{deployment.project!r}, not {project!r}"
+            )
+
+        used = await asyncio.to_thread(state.quota_today, project)
+        if used >= config.pipeline.daily_dispatch_cap:
+            raise QuotaExceeded(
+                f"{project} hit daily cap ({used}/{config.pipeline.daily_dispatch_cap})"
+            )
+
+        # Force opus — diagnose is reasoning-heavy; never downgrade.
+        resolved_model = model or _DEFAULT_MODEL
+        prev_good = await asyncio.to_thread(
+            state.previous_successful_deployment, project, before_id=deployment_id
+        )
+        bundle = self._build_diagnose_bundle(deployment, prev_good)
+
+        async with self._sem:
+            return await self._run_diagnose(
+                entry=entry,
+                deployment=deployment,
+                bundle=bundle,
+                model=resolved_model,
             )
 
     async def bump_cycle(self, project: str, issue: int) -> int:
@@ -361,6 +414,204 @@ class Dispatcher:
             exit_code=exit_code,
             log_path=log_path,
             duration_s=duration_s,
+        )
+
+    def _build_diagnose_bundle(
+        self,
+        deployment: state.DeploymentRow,
+        prev_good: state.DeploymentRow | None,
+    ) -> dict[str, Any]:
+        """Compose the JSON bundle the diagnose agent reads from its prompt."""
+        return {
+            "deployment_id": deployment.id,
+            "project": deployment.project,
+            "failed_sha": deployment.sha,
+            "failed_short_sha": deployment.short_sha,
+            "previous_good_sha": prev_good.sha if prev_good else None,
+            "previous_good_short_sha": prev_good.short_sha if prev_good else None,
+            "deployed_at": deployment.deployed_at,
+            "service_unit": deployment.service_unit,
+            "workflow_run_url": deployment.workflow_run_url,
+            "journal_tail": deployment.journal_tail,
+        }
+
+    async def _run_diagnose(
+        self,
+        *,
+        entry: ProjectEntry,
+        deployment: state.DeploymentRow,
+        bundle: dict[str, Any],
+        model: str,
+    ) -> DispatchResult:
+        log_path = self._diagnose_log_path(entry.name, deployment.id)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        triggered_by = f"auto:deploy-failure-{deployment.id}"
+        started = datetime.now(timezone.utc)
+        dispatch_id = await asyncio.to_thread(
+            state.record_dispatch,
+            project=entry.name,
+            issue=_NO_ISSUE,
+            stage=_DIAGNOSE_STAGE,
+            started_at=started.isoformat(timespec="seconds"),
+            triggered_by=triggered_by,
+            deployment_id=deployment.id,
+        )
+        # Link the deployment row back to this dispatch eagerly so a crash
+        # mid-run still leaves a discoverable trail in the database.
+        await asyncio.to_thread(
+            state.set_deployment_diagnose_dispatch, deployment.id, dispatch_id
+        )
+
+        log.info(
+            "diagnose start id=%d project=%s deployment=%d model=%s",
+            dispatch_id, entry.name, deployment.id, model,
+        )
+        await self._publish(
+            {
+                "kind": "dispatch_started",
+                "dispatch_id": dispatch_id,
+                "project": entry.name,
+                "issue": _NO_ISSUE,
+                "stage": _DIAGNOSE_STAGE,
+                "deployment_id": deployment.id,
+                "model": model,
+                "log_path": str(log_path),
+            }
+        )
+
+        argv = self._build_diagnose_argv(
+            model=model, project_path=entry.path, bundle=bundle,
+        )
+        proc = await self._spawner(
+            argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            limit=_STREAM_READER_LIMIT,
+        )
+
+        stream_overflow = False
+        with log_path.open("w", encoding="utf-8") as logf:
+            assert proc.stdout is not None
+            try:
+                async for line_bytes in proc.stdout:
+                    line = line_bytes.decode(errors="replace")
+                    logf.write(line)
+                    logf.flush()
+                    await self._publish(
+                        {
+                            "kind": "dispatch_stdout",
+                            "dispatch_id": dispatch_id,
+                            "project": entry.name,
+                            "issue": _NO_ISSUE,
+                            "stage": _DIAGNOSE_STAGE,
+                            "deployment_id": deployment.id,
+                            "line": line.rstrip("\n"),
+                        }
+                    )
+            except asyncio.LimitOverrunError as e:
+                log.error(
+                    "diagnose %d: stdout line exceeded reader limit (%s); terminating",
+                    dispatch_id, e,
+                )
+                stream_overflow = True
+                proc.terminate()
+                logf.write(
+                    "\n[fabric] stdout line exceeded reader limit; "
+                    "subprocess terminated by dispatcher\n"
+                )
+                logf.flush()
+
+        if stream_overflow:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=_TERMINATE_GRACE_S)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+            exit_code = _OVERFLOW_EXIT_CODE
+        else:
+            exit_code = await proc.wait()
+        ended = datetime.now(timezone.utc)
+
+        await asyncio.to_thread(
+            state.complete_dispatch,
+            dispatch_id,
+            ended_at=ended.isoformat(timespec="seconds"),
+            exit_code=exit_code,
+            log_path=str(log_path),
+        )
+        await asyncio.to_thread(state.inc_quota, entry.name)
+
+        duration_s = (ended - started).total_seconds()
+        if exit_code == 0:
+            log.info(
+                "diagnose end id=%d project=%s deployment=%d exit=0 duration=%.1fs",
+                dispatch_id, entry.name, deployment.id, duration_s,
+            )
+        else:
+            log.warning(
+                "diagnose FAILED id=%d project=%s deployment=%d exit=%d "
+                "duration=%.1fs log=%s",
+                dispatch_id, entry.name, deployment.id, exit_code, duration_s,
+                log_path,
+            )
+
+        await self._publish(
+            {
+                "kind": "dispatch_ended",
+                "dispatch_id": dispatch_id,
+                "project": entry.name,
+                "issue": _NO_ISSUE,
+                "stage": _DIAGNOSE_STAGE,
+                "deployment_id": deployment.id,
+                "exit_code": exit_code,
+                "log_path": str(log_path),
+            }
+        )
+
+        return DispatchResult(
+            dispatch_id=dispatch_id,
+            exit_code=exit_code,
+            log_path=log_path,
+            duration_s=duration_s,
+        )
+
+    def _build_diagnose_argv(
+        self, *, model: str, project_path: str, bundle: dict[str, Any],
+    ) -> list[str]:
+        # The skill is auto-discovered from <project_path>/.claude/skills/
+        # deploy-diagnose/SKILL.md. The prompt only carries the bundle —
+        # the skill prose tells the agent what to do with it.
+        bundle_json = json.dumps(bundle, indent=2, ensure_ascii=False)
+        prompt = (
+            "Run the deploy-diagnose skill against this failed deployment. "
+            "The bundle below is the only structured input you have; the "
+            "rest comes from reading the repo and gh.\n\n"
+            "```json\n"
+            f"{bundle_json}\n"
+            "```\n"
+        )
+        return [
+            "claude",
+            "-p",
+            "--model",
+            model,
+            "--permission-mode",
+            "bypassPermissions",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--add-dir",
+            project_path,
+            "--",
+            prompt,
+        ]
+
+    def _diagnose_log_path(self, project: str, deployment_id: int) -> Path:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        return (
+            self._home / "logs" / project / "_diagnose"
+            / f"deploy-{deployment_id}-{ts}.log"
         )
 
     def _build_argv(self, *, model: str, project_path: str, stage: str, issue: int) -> list[str]:

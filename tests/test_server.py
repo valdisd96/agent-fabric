@@ -368,7 +368,11 @@ def test_post_deploy_failure_records_failed(client: TestClient) -> None:
     assert body["status"] == "failed"
     assert body["sha"] == "def5678"
     assert body["journal_tail"] == "ModuleNotFoundError: redis"
-    assert body["diagnose_dispatch_id"] is None  # diagnose wiring is a follow-up
+    # diagnose_dispatch_id is None *at response time* — the auto-dispatch
+    # fires-and-forgets, and the response is built from the row as just
+    # inserted. The link gets populated later by the diagnose task itself
+    # (covered by the spy test below + dispatcher tests).
+    assert body["diagnose_dispatch_id"] is None
 
 
 def test_post_deploy_failure_404_unknown_project(client: TestClient) -> None:
@@ -377,6 +381,70 @@ def test_post_deploy_failure_404_unknown_project(client: TestClient) -> None:
         json={"sha": "abc"},
     )
     assert r.status_code == 404
+
+
+def test_post_deploy_failure_dispatches_diagnose(
+    client: TestClient, setup: dict[str, Any]
+) -> None:
+    """The endpoint fires-and-forgets `dispatch_deploy_diagnose`. Replace
+    it with an async spy so we don't depend on the FakeSpawner pipeline
+    completing within the request lifecycle, and verify the wiring scheduled
+    a call against the new deployment row."""
+    from fabric.dispatcher import DispatchResult
+
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    diag_calls: list[tuple[str, int]] = []
+
+    async def spy(project: str, deployment_id: int, **kwargs: Any) -> DispatchResult:
+        diag_calls.append((project, deployment_id))
+        return DispatchResult(
+            dispatch_id=99,
+            exit_code=0,
+            log_path=Path("/tmp/diag.log"),
+            duration_s=0.0,
+        )
+
+    setup["dispatcher"].dispatch_deploy_diagnose = spy
+
+    r = client.post(
+        "/api/projects/teach-me-eng-bot/deploy-failures",
+        json={"sha": "deadbeef"},
+    )
+    assert r.status_code == 200
+    deployment_id = r.json()["id"]
+
+    # The diagnose task is fire-and-forget. A follow-up sync request drives
+    # the loop until the scheduled task can run.
+    client.get("/healthz")
+
+    assert diag_calls == [("teach-me-eng-bot", deployment_id)]
+
+
+def test_post_deploy_success_does_not_dispatch_diagnose(
+    client: TestClient, setup: dict[str, Any]
+) -> None:
+    """Successful deploys are recorded but never trigger diagnose."""
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+
+    diag_calls: list[Any] = []
+    original = setup["dispatcher"].dispatch_deploy_diagnose
+
+    async def spy(*args: Any, **kwargs: Any) -> Any:
+        diag_calls.append((args, kwargs))
+        return await original(*args, **kwargs)
+
+    setup["dispatcher"].dispatch_deploy_diagnose = spy
+
+    r = client.post(
+        "/api/projects/teach-me-eng-bot/deployments",
+        json={
+            "sha": "abc1234",
+            "deployed_at": "2026-05-06T18:00:00+00:00",
+        },
+    )
+    assert r.status_code == 200
+    client.get("/healthz")
+    assert diag_calls == []
 
 
 def test_get_deployments_empty(client: TestClient) -> None:

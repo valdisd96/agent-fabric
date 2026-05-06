@@ -29,6 +29,31 @@ from fabric.registry import find as find_project
 from fabric.scheduler import Scheduler
 
 
+def _diagnose_done_callback(task: "asyncio.Task[Any]", *, deployment_id: int) -> None:
+    """Fire-and-forget completion handler for auto-dispatched diagnose runs.
+
+    The POST /deploy-failures endpoint returns 200 as soon as the row lands;
+    the diagnose dispatch then runs against the dispatcher's single-flight
+    semaphore. Without this callback, exceptions would be swallowed by the
+    asyncio loop and we'd see no record of why diagnose didn't fire.
+    """
+    if task.cancelled():
+        log.warning("diagnose task cancelled for deployment_id=%d", deployment_id)
+        return
+    exc = task.exception()
+    if exc is None:
+        result = task.result()
+        log.info(
+            "diagnose completed for deployment_id=%d dispatch_id=%d exit=%d",
+            deployment_id, result.dispatch_id, result.exit_code,
+        )
+    else:
+        log.exception(
+            "diagnose dispatch failed for deployment_id=%d", deployment_id,
+            exc_info=exc,
+        )
+
+
 log = logging.getLogger("fabric.server")
 
 
@@ -255,9 +280,9 @@ def _wire_routes(
     async def post_deploy_failure(
         project: str, req: am.DeployFailureRequest
     ) -> am.DeploymentOut:
-        """Record a failed deploy. The deploy-diagnose skill auto-dispatch
-        against this row is a follow-up — for now we just persist the bundle
-        so the future diagnose pass has the data it needs."""
+        """Record a failed deploy and fire-and-forget the deploy-diagnose
+        dispatch. POST returns 200 once the row lands; diagnose runs in the
+        background against the dispatcher's single-flight semaphore."""
         _require_project(project)
         deployment = await asyncio.to_thread(
             state.record_deployment,
@@ -269,11 +294,14 @@ def _wire_routes(
             journal_tail=req.journal_tail,
         )
         log.warning(
-            "deploy failed: project=%s sha=%s deployment_id=%s "
-            "— diagnose dispatch wiring pending",
-            project,
-            req.sha,
-            deployment.id,
+            "deploy failed: project=%s sha=%s deployment_id=%d — dispatching diagnose",
+            project, req.sha, deployment.id,
+        )
+        task = asyncio.create_task(
+            dispatcher.dispatch_deploy_diagnose(project, deployment.id)
+        )
+        task.add_done_callback(
+            lambda t: _diagnose_done_callback(t, deployment_id=deployment.id)
         )
         return _deployment_to_out(deployment)
 

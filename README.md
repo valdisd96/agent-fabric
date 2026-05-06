@@ -67,10 +67,17 @@ an install directory the runner can write to, and creating
 [`examples/runbooks/deploy-setup.md`](examples/runbooks/deploy-setup.md).
 
 Deploy failures intentionally do **not** auto-rollback. The broken version
-stays running while the fabric's `deploy-diagnose` skill (forthcoming) reads
-the failure, files a GH issue, and lets the existing pipeline ship the fix.
-See DESIGN.md "Decision 15 — Deployment of managed projects" for the full
-shape and rationale.
+stays running while the fabric's `deploy-diagnose` skill reads the failure
+bundle, the project's `docs/deploy.md`, and `git log <last_good>..<failed>`,
+then files a properly-labeled GH issue (`state:needs-planning`,
+`priority:high`, `type:bug`, `area:deploy`) that the existing pipeline picks
+up. The fix-PR's merge auto-deploys and supersedes the broken version.
+
+Auto-dispatched on `POST /api/projects/<n>/deploy-failures`; runnable
+manually via `fabric diagnose <project> <deployment-id>` (useful for
+re-running after updating `docs/deploy.md`). See DESIGN.md
+"Decision 15 — Deployment of managed projects" for the full shape and
+rationale.
 
 Bump the pinned SHA intentionally to adopt fabric updates — you'll see the resulting skill diff in the same PR.
 

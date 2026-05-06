@@ -164,6 +164,44 @@ def dispatch(
 
 
 @app.command()
+def diagnose(
+    project: str = typer.Argument(..., help="Project name (must be registered)"),
+    deployment_id: int = typer.Argument(
+        ..., help="Failed deployment id (see `fabric status` or the deployments REST endpoint)"
+    ),
+    model: str = typer.Option(
+        "", "--model", help="Override model. Empty = default opus."
+    ),
+) -> None:
+    """Manually run the deploy-diagnose skill against a failed deployment.
+
+    Useful for re-running diagnose after updating `docs/deploy.md`, or when
+    the auto-dispatch from POST /deploy-failures didn't fire. The agent
+    files a GH issue with `state:needs-planning` that the existing pipeline
+    picks up.
+    """
+    from fabric.dispatcher import Dispatcher, DispatchError
+    from fabric.state import init_db
+
+    init_db()
+    dispatcher = Dispatcher()
+    try:
+        result = asyncio.run(
+            dispatcher.dispatch_deploy_diagnose(
+                project, deployment_id, model=model or None,
+            )
+        )
+    except DispatchError as e:
+        typer.echo(f"diagnose: {e}", err=True)
+        raise typer.Exit(1) from e
+
+    typer.echo(
+        f"diagnose: id={result.dispatch_id} exit={result.exit_code} "
+        f"duration={result.duration_s:.1f}s log={result.log_path}"
+    )
+
+
+@app.command()
 def status() -> None:
     """Text dump of current queue state."""
     from fabric.state import (
