@@ -1008,6 +1008,85 @@ def test_clarification_body_falls_back_when_no_agent_comment(
     assert "<!-- agent-" not in body
 
 
+# ---------- cycle-counter on rework entry ----------
+
+
+def test_transition_to_needs_rework_bumps_cycle_count(
+    base_setup: Path,
+) -> None:
+    """`Dispatcher.bump_cycle` exists but had no call site — cycle_count
+    stayed at 0 forever, the cap was dead, and runaway rework loops
+    couldn't auto-block. The scheduler must now bump on every observed
+    transition into `state:needs-rework`."""
+    state.upsert_project(
+        name="teach-me-eng-bot", path=str(base_setup),
+        repo="valdisd96/teach-me-eng-bot",
+    )
+    state.upsert_issue(
+        project="teach-me-eng-bot", number=1,
+        state_label="state:in-review", title="t", url="u",
+        author="valdisd96", created_at="2026-05-01T10:00:00Z",
+    )
+
+    gh_runner = FakeGhRunner(
+        list_issues_payload=[_issue_payload(1, "state:needs-rework")],
+    )
+    _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+
+    row = state.get_issue("teach-me-eng-bot", 1)
+    assert row is not None
+    assert row.cycle_count == 1
+
+
+def test_repeated_observation_at_needs_rework_does_not_double_bump(
+    base_setup: Path,
+) -> None:
+    """If two consecutive ticks both see the issue at `state:needs-rework`
+    (no transition), cycle_count must NOT increment again. The bump fires
+    only on the entry transition."""
+    state.upsert_project(
+        name="teach-me-eng-bot", path=str(base_setup),
+        repo="valdisd96/teach-me-eng-bot",
+    )
+    state.upsert_issue(
+        project="teach-me-eng-bot", number=1,
+        state_label="state:in-review", title="t", url="u",
+        author="valdisd96", created_at="2026-05-01T10:00:00Z",
+    )
+    # Tick 1: in-review → needs-rework. Bump fires.
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(
+            list_issues_payload=[_issue_payload(1, "state:needs-rework")],
+        ),
+    ).tick())
+    # Tick 2: needs-rework → needs-rework (no transition). No bump.
+    _aiorun(_make_scheduler(
+        gh_runner=FakeGhRunner(
+            list_issues_payload=[_issue_payload(1, "state:needs-rework")],
+        ),
+    ).tick())
+
+    row = state.get_issue("teach-me-eng-bot", 1)
+    assert row is not None
+    assert row.cycle_count == 1
+
+
+def test_first_sight_at_needs_rework_does_not_bump(base_setup: Path) -> None:
+    """If the issue is observed for the very first time at
+    `state:needs-rework` (e.g. fabric just installed), don't bump —
+    we don't know if this is cycle 1 or cycle 5. `bump_cycle` itself
+    recovers the right counter from the GH HTML comment when we DO
+    have a transition to bump on, so this caution is harmless."""
+    gh_runner = FakeGhRunner(
+        list_issues_payload=[_issue_payload(1, "state:needs-rework")],
+    )
+    _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+
+    row = state.get_issue("teach-me-eng-bot", 1)
+    assert row is not None
+    assert row.cycle_count == 0
+
+
 def test_no_advance_when_parent_lacks_type_epic(base_setup: Path) -> None:
     """A closed issue Refs'ing a non-epic parent (e.g. a regular bug
     cross-referencing another bug) is a coincidence — don't act."""

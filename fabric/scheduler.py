@@ -15,6 +15,7 @@ the synchronous decision layer + the CLI hook.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -26,6 +27,9 @@ from fabric import state
 from fabric.config import FabricConfig, load_project_config
 from fabric.dispatcher import Dispatcher, DispatchError, QuotaExceeded
 from fabric.registry import ProjectEntry, fabric_home, load_registry
+
+
+log = logging.getLogger("fabric.scheduler")
 
 
 # Pseudo-state used internally when an open issue has no `state:*` label on
@@ -441,6 +445,27 @@ class Scheduler:
                     issue=issue.number,
                     body=body,
                 )
+
+            # Cycle-counter bump on entry into state:needs-rework. Without
+            # this the cap is dead — `Dispatcher.bump_cycle` exists but no
+            # call site invokes it, so cycle_count stays at 0 forever and
+            # runaway rework loops never auto-block. We bump only on
+            # observed transitions (not first-sight) so a fabric restart
+            # mid-rework doesn't double-count. `bump_cycle` itself does
+            # `max(GH-comment, DB) + 1` so a fabric reinstall recovers
+            # the right counter from the GH HTML comment.
+            if (
+                prev_state is not None
+                and prev_state != "state:needs-rework"
+                and state_label == "state:needs-rework"
+            ):
+                try:
+                    await self._dispatcher.bump_cycle(entry.name, issue.number)
+                except Exception:
+                    log.exception(
+                        "bump_cycle failed for %s#%d",
+                        entry.name, issue.number,
+                    )
 
             if author not in config.project.trusted_authors:
                 continue
