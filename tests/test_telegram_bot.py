@@ -308,6 +308,20 @@ def test_notification_buttons_dispatch_failed_has_retry_and_block() -> None:
     assert "block" in actions
 
 
+def test_notification_buttons_decompose_approval_has_only_approve() -> None:
+    """Approve is one-tap (post `/decompose-ok` + flip). Reject was
+    removed because revisions need feedback text — handled by the
+    reply-to-message path with its auto-flip."""
+    n = state.NotificationRow(
+        id=1, kind="decompose-approval", project="p", issue=2,
+        created_at="t", delivered_to=None, acknowledged_at=None,
+    )
+    rows = notification_buttons(n)
+    flat = [b for row in rows for b in row]
+    actions = {decode_callback(b["callback_data"]).action for b in flat if b.get("callback_data")}  # type: ignore[union-attr]
+    assert actions == {"approve_decompose"}
+
+
 # ---------- callback dispatch ----------
 
 
@@ -335,6 +349,61 @@ def test_handle_callback_unknown_action_returns_explanation(
 ) -> None:
     result = _aiorun(handle_callback(rest, CallbackPayload(action="nuke", project="p", number=1)))
     assert "unknown action" in result
+
+
+def test_handle_callback_reject_decompose_no_longer_supported(
+    rest: httpx.AsyncClient,
+) -> None:
+    """The Reject button was removed (see `notification_buttons`) so
+    `reject_decompose` is no longer a valid action — it should fall
+    through to the unknown-action branch instead of silently posting
+    the meaningless `decompose:reject` comment it used to."""
+    result = _aiorun(handle_callback(
+        rest,
+        CallbackPayload(action="reject_decompose", project="p", number=1),
+    ))
+    assert "unknown action" in result
+
+
+def test_handle_callback_approve_decompose_posts_decompose_ok_literal(
+    isolated_state_db: Path, app_setup: dict[str, Any], rest: httpx.AsyncClient
+) -> None:
+    """The agent's decision tree §A1 looks for the literal `/decompose-ok`
+    token. The previous "decompose:approve" string was a no-op."""
+    payload = CallbackPayload(
+        action="approve_decompose", project="teach-me-eng-bot", number=1,
+    )
+    result = _aiorun(handle_callback(rest, payload))
+    assert result == "approved"
+
+    comment_calls = [
+        c for c in app_setup["gh_runner"].calls if c[1:3] == ["issue", "comment"]
+    ]
+    assert comment_calls, "expected a `gh issue comment` call"
+    body_idx = comment_calls[0].index("--body")
+    assert comment_calls[0][body_idx + 1] == "/decompose-ok"
+
+
+def test_handle_callback_approve_decompose_flips_resume_state(
+    isolated_state_db: Path, app_setup: dict[str, Any], rest: httpx.AsyncClient
+) -> None:
+    """After Approve: state:awaiting-decompose-approval → state:needs-decompose
+    so the next tick re-dispatches `epic-decompose` to file children."""
+    payload = CallbackPayload(
+        action="approve_decompose", project="teach-me-eng-bot", number=1,
+    )
+    _aiorun(handle_callback(rest, payload))
+
+    edit_calls = [
+        c for c in app_setup["gh_runner"].calls if c[1:3] == ["issue", "edit"]
+    ]
+    assert any(
+        "--add-label" in c and "state:needs-decompose" in c for c in edit_calls
+    )
+    assert any(
+        "--remove-label" in c and "state:awaiting-decompose-approval" in c
+        for c in edit_calls
+    )
 
 
 # ---------- reply-to-message ----------
