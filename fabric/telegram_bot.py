@@ -179,9 +179,12 @@ def notification_buttons(n: state.NotificationRow) -> list[list[dict[str, str]]]
             {"text": "Mute", "callback_data": encode_callback("mute", n.project, n.issue)},
         ]]
     if n.kind == "decompose-approval":
+        # Approve is one-tap (post `/decompose-ok` + flip resume state).
+        # There's deliberately no "Reject" button: revisions need the
+        # human's actual feedback text, which the reply-to-message path
+        # (with the auto-flip from #46) already handles cleanly.
         return [[
             {"text": "Approve", "callback_data": encode_callback("approve_decompose", n.project, n.issue)},
-            {"text": "Reject", "callback_data": encode_callback("reject_decompose", n.project, n.issue)},
         ]]
     return []
 
@@ -215,15 +218,29 @@ async def handle_callback(
             f"/api/prs/{p}/{n}/review", json={"action": "approve"}
         )
         return "approved" if r.is_success else f"error {r.status_code}"
-    if a in ("approve_decompose", "reject_decompose"):
-        # Let the user answer with a comment in the next reply; for now, just
-        # post the verdict as a comment so the agent picks it up next tick.
-        verdict = "approve" if a == "approve_decompose" else "reject"
+    if a == "approve_decompose":
+        # `epic-decompose`'s decision tree §A1 looks for the literal
+        # `/decompose-ok` token in a comment dated after the proposal.
+        # Then we flip the resume state so the next tick re-dispatches
+        # and files the children. Comment-post is the primary action;
+        # the label flip is best-effort.
         r = await rest.post(
             f"/api/issues/{p}/{n}/comment",
-            json={"body": f"decompose:{verdict}"},
+            json={"body": "/decompose-ok"},
         )
-        return verdict if r.is_success else f"error {r.status_code}"
+        if not r.is_success:
+            return f"error {r.status_code}"
+        try:
+            await rest.post(
+                f"/api/issues/{p}/{n}/label",
+                json={
+                    "add": ["state:needs-decompose"],
+                    "remove": ["state:awaiting-decompose-approval"],
+                },
+            )
+        except httpx.HTTPError:
+            pass
+        return "approved"
     return f"unknown action: {a}"
 
 
