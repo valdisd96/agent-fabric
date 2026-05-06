@@ -55,6 +55,17 @@ _LOW_PRIORITY_LABEL = "priority:low"
 _CYCLE_MARKER = "cycle"
 _CYCLE_SENTINEL = f"<!-- agent-fabric:{_CYCLE_MARKER} -->"
 
+# Asyncio's StreamReader defaults to a 64 KB buffer per readline. The agent
+# runs with `--output-format stream-json --verbose`, which emits one JSON
+# event per tool call; a single big tool result (long file read, verbose
+# bash output) easily exceeds 64 KB. When that happens the reader raises
+# LimitOverrunError mid-dispatch and the subprocess gets orphaned. 16 MB
+# fits any realistic event without forcing a defensive overflow path on
+# the hot path.
+_STREAM_READER_LIMIT = 16 * 1024 * 1024
+_OVERFLOW_EXIT_CODE = -1
+_TERMINATE_GRACE_S = 5.0
+
 
 async def _default_spawner(args: list[str], **kwargs: Any) -> asyncio.subprocess.Process:
     return await asyncio.create_subprocess_exec(*args, **kwargs)
@@ -248,26 +259,56 @@ class Dispatcher:
             argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            limit=_STREAM_READER_LIMIT,
         )
 
+        stream_overflow = False
         with log_path.open("w", encoding="utf-8") as logf:
             assert proc.stdout is not None
-            async for line_bytes in proc.stdout:
-                line = line_bytes.decode(errors="replace")
-                logf.write(line)
-                logf.flush()
-                await self._publish(
-                    {
-                        "kind": "dispatch_stdout",
-                        "dispatch_id": dispatch_id,
-                        "project": entry.name,
-                        "issue": issue,
-                        "stage": stage,
-                        "line": line.rstrip("\n"),
-                    }
+            try:
+                async for line_bytes in proc.stdout:
+                    line = line_bytes.decode(errors="replace")
+                    logf.write(line)
+                    logf.flush()
+                    await self._publish(
+                        {
+                            "kind": "dispatch_stdout",
+                            "dispatch_id": dispatch_id,
+                            "project": entry.name,
+                            "issue": issue,
+                            "stage": stage,
+                            "line": line.rstrip("\n"),
+                        }
+                    )
+            except asyncio.LimitOverrunError as e:
+                # Single stdout line still bigger than 16 MB. Defensive —
+                # don't leave the subprocess orphaned the way the prior
+                # 64 KB default did. Terminate, fall through, and let the
+                # standard end-of-dispatch path close the DB row with a
+                # synthetic failure code so single-flight stays honest.
+                log.error(
+                    "dispatch %d: stdout line exceeded reader limit "
+                    "(%s); terminating subprocess",
+                    dispatch_id,
+                    e,
                 )
+                stream_overflow = True
+                proc.terminate()
+                logf.write(
+                    f"\n[fabric] stdout line exceeded reader limit; "
+                    f"subprocess terminated by dispatcher\n"
+                )
+                logf.flush()
 
-        exit_code = await proc.wait()
+        if stream_overflow:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=_TERMINATE_GRACE_S)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+            exit_code = _OVERFLOW_EXIT_CODE
+        else:
+            exit_code = await proc.wait()
         ended = datetime.now(timezone.utc)
 
         await asyncio.to_thread(

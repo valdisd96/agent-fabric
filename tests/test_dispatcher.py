@@ -46,29 +46,64 @@ class _AsyncByteLines:
 
 
 @dataclass
+class _OverflowingByteLines:
+    """Yields some lines then raises asyncio.LimitOverrunError, simulating
+    a single stdout line bigger than the StreamReader's buffer limit."""
+
+    lines: list[bytes]
+
+    def __aiter__(self) -> "_OverflowingByteLines":
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self.lines:
+            return self.lines.pop(0)
+        raise asyncio.LimitOverrunError("simulated", consumed=2**16)
+
+
+@dataclass
 class FakeProc:
-    stdout: _AsyncByteLines
+    stdout: Any  # _AsyncByteLines or _OverflowingByteLines
     exit_code: int = 0
+    terminate_called: bool = False
+    kill_called: bool = False
 
     async def wait(self) -> int:
         return self.exit_code
 
+    def terminate(self) -> None:
+        self.terminate_called = True
+
+    def kill(self) -> None:
+        self.kill_called = True
+
 
 @dataclass
 class FakeSpawner:
-    """Records argv per call, returns scripted FakeProc instances."""
+    """Records argv + kwargs per call, returns scripted FakeProc instances."""
 
     lines: list[str] = field(default_factory=list)
     exit_code: int = 0
+    overflow_after_lines: bool = False
     calls: list[list[str]] = field(default_factory=list)
+    kwargs_calls: list[dict[str, Any]] = field(default_factory=list)
+    procs: list[FakeProc] = field(default_factory=list)
     on_call: Any = None
 
     async def __call__(self, args: list[str], **kwargs: Any) -> FakeProc:
         self.calls.append(list(args))
+        self.kwargs_calls.append(dict(kwargs))
         if self.on_call is not None:
             await self.on_call()
         bytes_lines = [(line + "\n").encode() for line in self.lines]
-        return FakeProc(stdout=_AsyncByteLines(bytes_lines), exit_code=self.exit_code)
+        stdout: Any = (
+            _OverflowingByteLines(bytes_lines)
+            if self.overflow_after_lines
+            else _AsyncByteLines(bytes_lines)
+        )
+        proc = FakeProc(stdout=stdout, exit_code=self.exit_code)
+        self.procs.append(proc)
+        return proc
 
 
 @dataclass
@@ -554,3 +589,78 @@ def test_bump_cycle_ignores_unparseable_comment(
 
     # falls back to DB-only counter (4 + 1)
     assert n == 5
+
+
+# ---------- stream overflow recovery ----------
+
+
+def test_dispatch_passes_large_stream_limit_to_spawner(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    """Asyncio's default 64 KB buffer overflows on big stream-json events
+    from the agent. We pass a 16 MB limit so the read survives any
+    realistic tool-result payload."""
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    spawner = FakeSpawner()
+    d = Dispatcher(spawner=spawner)
+
+    _aiorun(d.dispatch("teach-me-eng-bot", 1, "plan-exec"))
+
+    assert spawner.kwargs_calls, "spawner not called"
+    limit = spawner.kwargs_calls[0].get("limit")
+    assert limit is not None
+    assert limit >= 16 * 1024 * 1024
+
+
+def test_dispatch_recovers_from_stdout_overflow(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    """If a single stdout line exceeds the 16 MB reader limit anyway,
+    the dispatcher must terminate the subprocess (not orphan it),
+    record the dispatch row as failed (exit_code=-1), and return
+    cleanly so the scheduler can retry / block via the normal path.
+    Without this fix the row stayed open and parallel `claude -p`
+    subprocesses ran simultaneously, breaking the single-flight
+    invariant."""
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    spawner = FakeSpawner(
+        lines=["pre-overflow line"],
+        exit_code=0,
+        overflow_after_lines=True,
+    )
+    d = Dispatcher(spawner=spawner)
+
+    result = _aiorun(d.dispatch("teach-me-eng-bot", 1, "plan-exec"))
+
+    assert result.exit_code == -1, "expected synthetic overflow failure code"
+    assert spawner.procs, "spawner did not return any procs"
+    assert spawner.procs[-1].terminate_called, "subprocess was not terminated"
+
+    # Dispatch row is closed (ended_at populated) so consecutive_failures
+    # accounting and single-flight stay coherent.
+    rows = state.dispatches_for_issue("teach-me-eng-bot", 1)
+    assert rows, "no dispatch row recorded"
+    assert all(r.ended_at for r in rows), "row left with NULL ended_at"
+    assert rows[-1].exit_code == -1
+
+
+def test_dispatch_overflow_log_captures_truncation_marker(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    """The on-disk log gets a clear marker at the truncation point so an
+    operator reading the log knows why output stopped."""
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    spawner = FakeSpawner(
+        lines=["normal output line"],
+        overflow_after_lines=True,
+    )
+    d = Dispatcher(spawner=spawner)
+    result = _aiorun(d.dispatch("teach-me-eng-bot", 1, "plan-exec"))
+
+    log_text = result.log_path.read_text()
+    assert "normal output line" in log_text
+    assert "stdout line exceeded reader limit" in log_text
+    assert "subprocess terminated" in log_text
