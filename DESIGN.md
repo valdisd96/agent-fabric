@@ -147,7 +147,12 @@ agent-fabric/
 │   ├── epic-decompose.md.j2
 │   └── qualify-issue.md.j2
 ├── examples/
-│   └── teach-me-eng-bot.config.yaml
+│   ├── teach-me-eng-bot.config.yaml
+│   ├── github-actions/
+│   │   ├── fabric-sync-check.yml      # drift gate for rendered skills
+│   │   └── deploy.yml                  # auto-deploy on push to main (Decision 15)
+│   └── runbooks/
+│       └── deploy-setup.md             # one-time provisioning for auto-deploy
 ├── scripts/
 │   ├── install-systemd.sh
 │   └── setup-labels.sh       # provisioned per-project, copied from here
@@ -511,6 +516,63 @@ WantedBy=multi-user.target
 `/etc/fabric/env` carries `FABRIC_HOME`, `FABRIC_HOST`, `FABRIC_PORT`,
 `FABRIC_TELEGRAM_TOKEN`, `FABRIC_TELEGRAM_CHAT_ID`. See SMOKE.md for the
 full bring-up walkthrough on a fresh VM.
+
+### Decision 15 — Deployment of managed projects
+
+Auto-deploy each managed project on push to `main` via GitHub Actions on a
+**repo-scoped self-hosted runner** living on the same VM as the fabric. The
+pipeline finishes at "user merges PR"; this decision picks up from there.
+
+**Why GH Actions on a self-hosted runner, not a fabric subsystem.** Production
+deploys must be deterministic, fast, and replayable; that's what `bash` + a
+static workflow gives you. The fabric stays out of the runtime path. Running
+on a self-hosted runner (vs. `ubuntu-latest`) avoids opening inbound HTTP /
+SSH on the VM — the runner pulls jobs over outbound HTTPS.
+
+**Why repo-scoped, not org-scoped.** A self-hosted runner registered to an
+org cannot serve a personal-account repo. Each managed project gets its own
+runner installation under `/srv/runners/<project>/` (separate systemd unit),
+labelled `self-hosted,deploy-target,<project>`. Multiple projects coexisting
+on one VM is fine — each has its own runner, its own working tree, its own
+service unit.
+
+**No auto-rollback. Self-healing via the agent loop instead.** When a deploy
+fails, the broken version stays running on the host. The workflow POSTs a
+failure bundle (sha, journal tail, workflow URL) to fabric, which dispatches
+the `deploy-diagnose` skill. Diagnose reads the failure plus the project's
+`docs/deploy.md` contract plus `git log <last_good>..main`, then files a GH
+issue labelled `state:needs-planning` with a hypothesised root cause. The
+existing scheduler picks the issue up like any other. The fix-PR's merge
+auto-deploys and supersedes the broken version. This makes "deploy
+regression" just another shape of work the fabric already knows how to do.
+
+**No PR-time deploy-impact gating.** An earlier draft proposed a
+`Deploy-Impact:` commit trailer + `review-pr` block on missing trailers. We
+dropped it: the deploy diff itself, the PR body, and `docs/deploy.md` are
+already enough signal for `deploy-diagnose` at the scale of single-project,
+small-changeset deploys. The trailer is a candidate to add back if diagnose
+starts mis-diagnosing in practice.
+
+**The deploy contract per project.** Every managed project carries a
+hand-maintained `docs/deploy.md` describing system deps, env vars, service
+topology, external services, and known failure modes. This is the document
+`deploy-diagnose` reads when reasoning about a failure. It is *not* a
+machine-applied manifest — it's a runbook the agent (and humans) read.
+
+**Surfaces and artifacts.**
+
+| Where | What |
+|---|---|
+| `examples/github-actions/deploy.yml` | Reusable workflow — copied into managed projects, five `CONFIGURE:` values filled per project. |
+| `examples/runbooks/deploy-setup.md` | One-time provisioning runbook (runner registration, install dir ownership, sudoers, deploy state dir). |
+| `/var/lib/<project>/deploy.json` | Per-project current-deploy manifest written by the workflow; read by fabric to surface in `/status`. |
+| `POST /api/projects/<name>/deployments` | Fabric REST endpoint (forward-looking) where the workflow records successes. |
+| `POST /api/projects/<name>/deploy-failures` | Fabric REST endpoint (forward-looking) where the workflow records failures; triggers `deploy-diagnose`. |
+| `fabric/skill_templates/deploy-diagnose/` | Skill template (forward-looking) — the agent's failure-reading playbook. |
+
+The workflow is shipped now and tolerates fabric not being wired (notify
+steps detect missing `FABRIC_DEPLOY_URL` and skip). The fabric-side
+endpoints + `deploy-diagnose` skill land in a follow-up.
 
 ### Decision 14 — CLI modes
 

@@ -1,0 +1,174 @@
+# Auto-deploy a managed project on push to `main`.
+#
+# Copy this file into a managed project at `.github/workflows/deploy.yml`,
+# fill in the five `CONFIGURE:` values in the `env:` block below, then
+# follow `examples/runbooks/deploy-setup.md` to register the self-hosted
+# runner and grant it the sudo capabilities it needs.
+#
+# What this does on push to main:
+#   1. Fetch + hard-reset the project's install directory on the host.
+#   2. Rebuild the venv only if `requirements.txt` changed (sha256 compare).
+#   3. Run `scripts/migrate.sh` if present (idempotent).
+#   4. Restart the systemd unit and verify it's active + journal is clean.
+#   5. Write `/var/lib/<project>/deploy.json` with the deploy manifest.
+#   6. POST the manifest (or failure bundle) to fabric, if configured.
+#
+# Failure handling: on any step's failure, the workflow exits non-zero and
+# (if FABRIC_DEPLOY_URL is set) posts a failure bundle to fabric. Auto-rollback
+# is intentionally NOT performed — the broken version stays running so the
+# `deploy-diagnose` skill can read live state, and the next merged fix-PR
+# triggers a fresh deploy that supersedes it.
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# ─────── CONFIGURE: project-specific values ───────
+env:
+  PROJECT_NAME: REPLACE_WITH_PROJECT_NAME            # matches `fabric register` name
+  INSTALL_DIR: /srv/REPLACE_WITH_PROJECT_NAME        # absolute path on the host VM
+  SERVICE_UNIT: REPLACE_WITH_PROJECT_NAME.service    # systemd unit to restart
+  REQUIREMENTS_FILE: requirements.txt                # leave blank if no Python deps
+  MIGRATE_SCRIPT: scripts/migrate.sh                 # leave blank if not used
+# ──────────────────────────────────────────────────
+
+jobs:
+  deploy:
+    # The runner must be registered to THIS repo (not an org/enterprise) and
+    # must carry the `deploy-target` label. See examples/runbooks/deploy-setup.md.
+    runs-on: [self-hosted, deploy-target]
+    concurrency:
+      # Queue concurrent deploys; do not cancel an in-flight one. Latest wins.
+      group: deploy-${{ github.workflow }}
+      cancel-in-progress: false
+
+    steps:
+      - name: pull latest into install dir
+        run: |
+          set -euo pipefail
+          sudo -n git -C "$INSTALL_DIR" fetch --quiet origin main
+          sudo -n git -C "$INSTALL_DIR" reset --hard "$GITHUB_SHA"
+          echo "host now at $(sudo -n git -C "$INSTALL_DIR" rev-parse --short HEAD)"
+
+      - name: refresh venv if requirements changed
+        run: |
+          set -euo pipefail
+          if [ -z "${REQUIREMENTS_FILE:-}" ] || ! sudo -n test -f "$INSTALL_DIR/$REQUIREMENTS_FILE"; then
+            echo "no requirements file declared — skipping venv refresh"
+            exit 0
+          fi
+          new_hash="$(sudo -n sha256sum "$INSTALL_DIR/$REQUIREMENTS_FILE" | awk '{print $1}')"
+          live_hash="$(sudo -n cat "$INSTALL_DIR/.venv/.requirements.sha256" 2>/dev/null || echo none)"
+          if [ "$live_hash" = "$new_hash" ]; then
+            echo "requirements unchanged ($new_hash) — reusing venv"
+            exit 0
+          fi
+          echo "requirements changed (was ${live_hash:0:12}, now ${new_hash:0:12}) — rebuilding venv"
+          sudo -n bash -eu -c "
+            cd '$INSTALL_DIR'
+            rm -rf .venv
+            python3 -m venv .venv
+            .venv/bin/pip install --quiet --upgrade pip
+            .venv/bin/pip install --quiet -r '$REQUIREMENTS_FILE'
+            echo '$new_hash' > .venv/.requirements.sha256
+          "
+
+      - name: run migrations if present
+        run: |
+          set -euo pipefail
+          if [ -n "${MIGRATE_SCRIPT:-}" ] && sudo -n test -x "$INSTALL_DIR/$MIGRATE_SCRIPT"; then
+            echo "running $MIGRATE_SCRIPT"
+            sudo -n "$INSTALL_DIR/$MIGRATE_SCRIPT"
+          else
+            echo "no migration script — skipping"
+          fi
+
+      - name: restart service
+        run: sudo -n systemctl restart "$SERVICE_UNIT"
+
+      - name: smoke check
+        run: |
+          set -euo pipefail
+          # Give the process time to load before judging it.
+          sleep 8
+          if ! sudo -n systemctl is-active --quiet "$SERVICE_UNIT"; then
+            echo "::error::$SERVICE_UNIT is not active after restart"
+            sudo -n journalctl -u "$SERVICE_UNIT" -n 200 --no-pager
+            exit 1
+          fi
+          # Fail if any error pattern appears in the first 60s of journal output.
+          if sudo -n journalctl -u "$SERVICE_UNIT" --since '60 seconds ago' --no-pager \
+              | grep -E '\b(ERROR|CRITICAL|Traceback)\b' >&2; then
+            echo "::error::error pattern in journal within 60s of restart"
+            exit 1
+          fi
+          echo "service healthy"
+
+      - name: write deploy manifest
+        if: success()
+        run: |
+          set -euo pipefail
+          ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          short_sha="${GITHUB_SHA:0:7}"
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          # /var/lib/<project>/ is created at provisioning time and owned by the
+          # runner user (see runbook). The cat below will fail loudly if it isn't.
+          cat > "/var/lib/$PROJECT_NAME/deploy.json" <<EOF
+          {
+            "sha": "$GITHUB_SHA",
+            "short_sha": "$short_sha",
+            "deployed_at": "$ts",
+            "branch": "$GITHUB_REF_NAME",
+            "actor": "$GITHUB_ACTOR",
+            "workflow_run_url": "$run_url"
+          }
+          EOF
+          echo "wrote /var/lib/$PROJECT_NAME/deploy.json"
+
+      - name: notify fabric (success)
+        if: success()
+        env:
+          FABRIC_DEPLOY_URL: ${{ secrets.FABRIC_DEPLOY_URL }}
+          FABRIC_TOKEN: ${{ secrets.FABRIC_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FABRIC_DEPLOY_URL:-}" ]; then
+            echo "FABRIC_DEPLOY_URL not set — skipping fabric notification (bootstrap mode)"
+            exit 0
+          fi
+          curl --silent --fail --max-time 10 \
+            -H "Authorization: Bearer $FABRIC_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d @"/var/lib/$PROJECT_NAME/deploy.json" \
+            "$FABRIC_DEPLOY_URL/api/projects/$PROJECT_NAME/deployments"
+
+      - name: notify fabric (failure)
+        if: failure()
+        env:
+          FABRIC_DEPLOY_URL: ${{ secrets.FABRIC_DEPLOY_URL }}
+          FABRIC_TOKEN: ${{ secrets.FABRIC_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FABRIC_DEPLOY_URL:-}" ]; then
+            echo "FABRIC_DEPLOY_URL not set — skipping fabric notification (bootstrap mode)"
+            exit 0
+          fi
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          journal_tail="$(sudo -n journalctl -u "$SERVICE_UNIT" --since '5 minutes ago' --no-pager 2>&1 | tail -100 || echo '<no journal>')"
+          payload="$(jq -n \
+            --arg sha "$GITHUB_SHA" \
+            --arg run_url "$run_url" \
+            --arg unit "$SERVICE_UNIT" \
+            --arg journal "$journal_tail" \
+            '{sha: $sha, status: "failed", workflow_run_url: $run_url, service_unit: $unit, journal_tail: $journal}')"
+          curl --silent --fail --max-time 10 \
+            -H "Authorization: Bearer $FABRIC_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$payload" \
+            "$FABRIC_DEPLOY_URL/api/projects/$PROJECT_NAME/deploy-failures"

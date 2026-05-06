@@ -47,6 +47,31 @@ cp /path/to/agent-fabric/examples/github-actions/fabric-sync-check.yml \
 
 The workflow installs agent-fabric at the pinned SHA and runs `fabric sync . --check` against the project. A failure means someone edited a file under `.claude/skills/` directly instead of changing the template in agent-fabric — the fix is to change the template, run `fabric sync <project>` locally, and commit the regenerated files.
 
+## Auto-deploy for managed projects
+
+A second workflow ships an opt-in auto-deploy pipeline: every push to `main`
+fetches the new commit on the host VM, refreshes the venv only if
+`requirements.txt` changed, runs an optional `scripts/migrate.sh`, restarts
+the systemd unit, smoke-checks, and writes `/var/lib/<project>/deploy.json`.
+
+```bash
+mkdir -p .github/workflows
+cp /path/to/agent-fabric/examples/github-actions/deploy.yml \
+   .github/workflows/deploy.yml
+# then edit the five CONFIGURE: values at the top of the file.
+```
+
+One-time host setup — registering a repo-scoped self-hosted runner, picking
+an install directory the runner can write to, and creating
+`/var/lib/<project>/` — is documented in
+[`examples/runbooks/deploy-setup.md`](examples/runbooks/deploy-setup.md).
+
+Deploy failures intentionally do **not** auto-rollback. The broken version
+stays running while the fabric's `deploy-diagnose` skill (forthcoming) reads
+the failure, files a GH issue, and lets the existing pipeline ship the fix.
+See DESIGN.md "Decision 15 — Deployment of managed projects" for the full
+shape and rationale.
+
 Bump the pinned SHA intentionally to adopt fabric updates — you'll see the resulting skill diff in the same PR.
 
 ## Roadmap

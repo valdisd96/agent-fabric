@@ -78,6 +78,7 @@ tests/
 | The config schema | `fabric/config.py` (pydantic v2 models) |
 | Sample managed-project config | `examples/teach-me-eng-bot.config.yaml` |
 | Drift CI workflow | `examples/github-actions/fabric-sync-check.yml` |
+| Auto-deploy workflow + runbook | `examples/github-actions/deploy.yml`, `examples/runbooks/deploy-setup.md` |
 
 ## Invariants
 
