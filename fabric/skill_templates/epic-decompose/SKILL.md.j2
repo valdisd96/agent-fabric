@@ -1,7 +1,7 @@
 ---
 name: epic-decompose
-description: Decomposition stage for `type:epic` issues at `state:needs-decompose`. Multi-round Socratic Q&A with the user (one round per dispatch), then proposes a child-issue list, awaits explicit approval (`/decompose-ok`), files children with `Refs #<parent>`, and parks the parent at `state:tracking`. Children are filed B3-style — child #1 at `state:needs-planning`, the rest at `state:draft` — so the fabric's coordinator can release them one at a time as each predecessor closes. Does NOT cut branches, write code, or open PRs.
-version: 2.0.0
+description: Decomposition stage for `type:epic` issues at `state:needs-decompose`. Multi-round Socratic Q&A with the user (one round per dispatch), then proposes a child-issue list, awaits explicit approval (`/decompose-ok`), files children with `Refs #<parent>`, and parks the parent at `state:tracking`. Children are filed B3-style — child #1 at `state:needs-planning`, the rest at `state:draft` — so the fabric's coordinator can release them one at a time as each predecessor closes. Considers documentation impact during decomposition so the epic doesn't close with stale docs. Does NOT cut branches, write code, or open PRs.
+version: 2.1.0
 ---
 
 # epic-decompose
@@ -136,6 +136,12 @@ Print `proposal posted: <N> children, awaiting approval` and exit.
 
 **Sizing rule of thumb.** Aim for 3–8 children. Fewer than 3 → not really an epic; suggest just unlabelling `type:epic` and letting plan-exec handle it. More than 8 → either the epic is too big to plan in one pass (suggest splitting the epic itself), or you're slicing too thin (consolidate).
 
+**Docs hygiene (when applicable).** If the epic adds, removes, or renames user-facing surface — slash commands, `/help` text, README sections, in-app banners, `/start` onboarding flow, configuration env vars, public CLI flags — the documentation needs to land somewhere. Two acceptable shapes:
+- **Trailing `type:docs` child** — a small, focused child at the end of the sequence that updates README + `/help` + any onboarding copy in one PR. Use this when the docs touch multiple files or when several feature children touch the same surface.
+- **Doc touch-ups inside feature children** — fold the docs work into the relevant feature child's acceptance criteria (e.g. AC: `/help` lists the new command). Use this when the docs change is small and tightly coupled to one feature.
+
+Either is fine. The sin is letting the epic auto-close with stale docs because no child owned them. If the epic is purely internal (refactor, infra, test coverage) — no user-facing surface change — say so explicitly in the proposal's "One-line shape" and skip the docs child.
+
 ## 4. File-children round (after `/decompose-ok`)
 
 Triggered when §A1 of the decision tree matches. For each child in the most recent proposal, **in the order you listed them**:
@@ -219,6 +225,7 @@ A non-exhaustive checklist of the kinds of unknowns to clear before proposing. W
 - **Test seams.** Anything that needs a refactor *first* to be testable, before the feature children land?
 - **External services / config.** New env vars? New API keys? Quotas?
 - **Naming.** Names of new commands, modules, labels — pick *or* ask.
+- **User-facing docs.** Which docs (README, `/help` command output, in-app banners, `/start` onboarding) describe the surface this epic touches? Are they out-of-date or generic enough to survive without changes? If non-trivial, the docs deserve their own child (or an explicit AC on the relevant feature child) — see "Docs hygiene" in §3.
 
 ## After-the-loop notes
 
