@@ -567,18 +567,34 @@ machine-applied manifest — it's a runbook the agent (and humans) read.
 | `examples/runbooks/deploy-setup.md` | One-time provisioning runbook (runner registration, install dir ownership, sudoers, deploy state dir). |
 | `/var/lib/<project>/deploy.json` | Per-project current-deploy manifest written by the workflow; read by fabric to surface in `/status`. |
 | `POST /api/projects/<name>/deployments` | Fabric REST endpoint where the workflow records successes (returns the persisted `DeploymentOut`). |
-| `POST /api/projects/<name>/deploy-failures` | Fabric REST endpoint where the workflow records failures; will trigger `deploy-diagnose` once that skill lands. |
+| `POST /api/projects/<name>/deploy-failures` | Fabric REST endpoint where the workflow records failures. Auto-dispatches `deploy-diagnose` against the new row in the background; POST returns 200 as soon as the row lands so the workflow doesn't block on the agent run. |
 | `GET /api/projects/<name>/deployments[?status=]` | Newest-first deployment history; `?status=success` or `failed` to filter. |
 | `GET /api/projects/<name>/deployments/latest[?status=]` | Most recent deployment. Default `status=success` answers "what's currently running" — what an agent reads to ground its work. |
-| `fabric/skill_templates/deploy-diagnose/` | Skill template (forward-looking) — the agent's failure-reading playbook. |
+| `fabric/skill_templates/deploy-diagnose/` | Skill template — the agent's failure-reading playbook. Reads the bundle from its prompt + `docs/deploy.md` + `git log <last_good>..<failed>`, files **one** GH issue (`state:needs-planning`, `priority:high`, `type:bug`, `area:deploy`) with hypothesised root cause and concrete suggested fix. |
+| `fabric diagnose <project> <deployment-id>` | CLI counterpart for manual triggering (re-running diagnose after updating `docs/deploy.md`, or smoke-testing). |
 
-The workflow and the four REST endpoints (plus the `deployments` table at
-`schema_version=5`) are shipped. The workflow tolerates fabric not being
-wired (notify steps detect missing `FABRIC_DEPLOY_URL` and skip), so projects
-can adopt auto-deploy before subscribing to fabric. The `deploy-diagnose`
-skill template + the auto-dispatch wiring on `deploy-failures` land in a
-follow-up; the failure endpoint already persists the bundle the diagnose
-pass will read.
+**Schema implications.** Diagnose dispatches don't have a GitHub issue at
+start time — the diagnose's *job* is to file one. Schema v6 adds a
+nullable `dispatches.deployment_id` column; the diagnose row uses
+`issue=0` as a sentinel and `deployment_id` as the positive link back to
+the failed deployment. The deployments row's `diagnose_dispatch_id` is
+populated eagerly (before the agent starts) so a crash mid-run still
+leaves a discoverable trail.
+
+**Quota & single-flight.** Diagnose dispatches consume the project's
+daily-cap quota like any other run, and queue behind the same
+`asyncio.Semaphore(1)` — exactly one agent at a time, by design. The
+auto-dispatch from `POST /deploy-failures` is fire-and-forget: the
+endpoint returns 200 once the row is persisted, the diagnose runs in a
+background task, and a logging callback narrates completion / failure
+to `journalctl`.
+
+What's still hand-maintained per project: `docs/deploy.md` (the
+project's deploy contract — system deps, env vars, service topology,
+known failure modes). The skill reads it as one of its primary inputs;
+projects that haven't written one can still be diagnosed (the agent
+falls back on `git log` + journal + the deploy workflow file) but with
+less precision.
 
 ### Decision 14 — CLI modes
 

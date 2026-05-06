@@ -22,7 +22,9 @@ Conceptually identical to SCSS → CSS or `protoc` output: humans edit the sourc
 
 **Overlay mechanism.** A managed project may replace any single skill by writing its own `<project>/.fabric/skills/<name>/SKILL.md.j2`. That overlay beats the fabric default at the whole-skill level (no section-level inheritance — see DESIGN.md "Override grain"). teach-me-eng-bot has zero overlays today.
 
-**The 6 fabric-managed skills:** `plan-exec`, `test-writer`, `review-pr`, `clarify-issue`, `epic-decompose`, `qualify-issue`. The list lives at `fabric/render.py::SKILL_NAMES`. `dev-flow` is intentionally project-internal — `fabric sync` does not touch it.
+**The 7 fabric-managed skills:** `plan-exec`, `test-writer`, `review-pr`, `clarify-issue`, `epic-decompose`, `qualify-issue`, `deploy-diagnose`. The list lives at `fabric/render.py::SKILL_NAMES`. `dev-flow` is intentionally project-internal — `fabric sync` does not touch it.
+
+`deploy-diagnose` is the only one that fires on a non-issue trigger (a deploy failure POST'd to `/api/projects/<n>/deploy-failures`). It runs against the failed `deployments` row, not a GitHub issue, and its job is to *file* an issue that the rest of the pipeline picks up. See DESIGN.md Decision 15.
 
 ## Repo layout
 
@@ -74,7 +76,7 @@ tests/
 |---|---|
 | Architecture, decisions, phased roadmap | `DESIGN.md` |
 | The development workflow rules | `.claude/skills/dev-flow/SKILL.md` |
-| The 5 skill names the fabric ships | `fabric/render.py::SKILL_NAMES` |
+| The 7 skill names the fabric ships | `fabric/render.py::SKILL_NAMES` |
 | The config schema | `fabric/config.py` (pydantic v2 models) |
 | Sample managed-project config | `examples/teach-me-eng-bot.config.yaml` |
 | Drift CI workflow | `examples/github-actions/fabric-sync-check.yml` |
@@ -118,7 +120,7 @@ fabric sync teach-me-eng-bot --check               # exit 0 / "is clean"
 - **Phase 2 — next.** Issue #3. HTMX kanban + action panel against the existing REST surface.
 - **Phase 3+** — multi-project hardening, GitHub App auth, webhook receiver.
 
-All ten CLI commands are real. `fabric server` runs uvicorn on `$FABRIC_HOST:$FABRIC_PORT` (default `127.0.0.1:7878`); the Telegram bot auto-starts inside its lifespan when `FABRIC_TELEGRAM_TOKEN` + `FABRIC_TELEGRAM_CHAT_ID` are both set, else logs a one-line warning and continues REST-only. Production install: `sudo bash scripts/install-systemd.sh` on a VPC VM, then fill `/etc/fabric/env` and `systemctl start fabric`. End-to-end walkthrough: `SMOKE.md`.
+All eleven CLI commands are real (the latest is `fabric diagnose <project> <deployment-id>` — manual trigger for `deploy-diagnose` against a failed deployment). `fabric server` runs uvicorn on `$FABRIC_HOST:$FABRIC_PORT` (default `127.0.0.1:7878`); the Telegram bot auto-starts inside its lifespan when `FABRIC_TELEGRAM_TOKEN` + `FABRIC_TELEGRAM_CHAT_ID` are both set, else logs a one-line warning and continues REST-only. Production install: `sudo bash scripts/install-systemd.sh` on a VPC VM, then fill `/etc/fabric/env` and `systemctl start fabric`. End-to-end walkthrough: `SMOKE.md`.
 
 ## What's deliberately not parameterized yet
 

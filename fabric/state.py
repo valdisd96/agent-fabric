@@ -65,6 +65,7 @@ class DispatchRow:
     exit_code: int | None
     log_path: str | None
     triggered_by: str
+    deployment_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +191,16 @@ ALTER TABLE notifications ADD COLUMN body TEXT;
 """
 
 
+_SCHEMA_V6 = """
+-- Deploy-diagnose dispatches aren't bound to a GitHub issue at start time
+-- — the diagnose's job is to file one. We keep `issue NOT NULL` for back-
+-- compat (every existing row has it) and use 0 as the sentinel; the
+-- positive signal is a non-NULL `deployment_id` linking back to the
+-- deployments row that triggered the run.
+ALTER TABLE dispatches ADD COLUMN deployment_id INTEGER;
+"""
+
+
 _SCHEMA_V5 = """
 CREATE TABLE deployments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -220,6 +231,7 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (3, _SCHEMA_V3),
     (4, _SCHEMA_V4),
     (5, _SCHEMA_V5),
+    (6, _SCHEMA_V6),
 ]
 
 
@@ -469,17 +481,21 @@ def record_dispatch(
     exit_code: int | None = None,
     log_path: str | None = None,
     triggered_by: str = "manual",
+    deployment_id: int | None = None,
 ) -> int:
     """Insert a dispatch row. `started_at` defaults to now-UTC.
 
     Pass `ended_at`/`exit_code`/`log_path` for one-step recording, or omit
     them and call `complete_dispatch` after the subprocess exits.
+
+    `deployment_id` is set for deploy-diagnose runs (issue=0 sentinel +
+    deployment_id pointing at the deployments row that triggered the run).
     """
     with connect() as conn:
         cur = conn.execute(
             "INSERT INTO dispatches (project, issue, stage, started_at, ended_at, "
-            "                        exit_code, log_path, triggered_by) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "                        exit_code, log_path, triggered_by, deployment_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project,
                 issue,
@@ -489,6 +505,7 @@ def record_dispatch(
                 exit_code,
                 log_path,
                 triggered_by,
+                deployment_id,
             ),
         )
         conn.commit()

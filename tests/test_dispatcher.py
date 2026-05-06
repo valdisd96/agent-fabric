@@ -664,3 +664,191 @@ def test_dispatch_overflow_log_captures_truncation_marker(
     assert "normal output line" in log_text
     assert "stdout line exceeded reader limit" in log_text
     assert "subprocess terminated" in log_text
+
+
+# ---------- dispatch_deploy_diagnose ----------
+
+
+def _record_failed_deployment(
+    *,
+    project: str = "teach-me-eng-bot",
+    sha: str = "deadbeef",
+    journal_tail: str = "ModuleNotFoundError: redis",
+) -> state.DeploymentRow:
+    state.upsert_project(name=project, path="/p", repo="me/x")
+    return state.record_deployment(
+        project=project,
+        sha=sha,
+        status="failed",
+        deployed_at="2026-05-06T18:05:00+00:00",
+        service_unit=f"{project}.service",
+        workflow_run_url="https://github.com/me/x/actions/runs/2",
+        journal_tail=journal_tail,
+    )
+
+
+def test_dispatch_diagnose_runs_subprocess_and_writes_log(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    failed = _record_failed_deployment()
+    spawner = FakeSpawner(lines=["diagnosing", "filed issue #99"], exit_code=0)
+    d = Dispatcher(spawner=spawner)
+
+    result = _aiorun(d.dispatch_deploy_diagnose("teach-me-eng-bot", failed.id))
+
+    assert result.exit_code == 0
+    assert result.log_path.exists()
+    text = result.log_path.read_text()
+    assert "diagnosing" in text and "filed issue #99" in text
+
+
+def test_dispatch_diagnose_argv_includes_bundle_json(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    """The agent reads the failure context from the prompt — the bundle
+    must be inlined as JSON, with the failed sha and journal tail visible."""
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    failed = _record_failed_deployment(
+        sha="cafebabe1234567",
+        journal_tail="Traceback ... ImportError: redis",
+    )
+    spawner = FakeSpawner()
+    d = Dispatcher(spawner=spawner)
+
+    _aiorun(d.dispatch_deploy_diagnose("teach-me-eng-bot", failed.id))
+
+    args = spawner.calls[0]
+    assert "claude" in args[0] and "-p" in args
+    # prompt sits after the `--` separator (same as regular dispatch)
+    sep_idx = args.index("--")
+    prompt = args[sep_idx + 1]
+    assert "deploy-diagnose" in prompt
+    assert "cafebabe1234567" in prompt
+    assert "ImportError: redis" in prompt
+    # And we still pass --add-dir for the project
+    assert "--add-dir" in args
+    assert str(project.resolve()) in args
+
+
+def test_dispatch_diagnose_includes_previous_good_sha(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    state.record_deployment(
+        project="teach-me-eng-bot", sha="goodsha", status="success",
+        deployed_at="2026-05-05T10:00:00+00:00",
+    )
+    failed = state.record_deployment(
+        project="teach-me-eng-bot", sha="badsha", status="failed",
+        deployed_at="2026-05-06T10:00:00+00:00",
+    )
+    spawner = FakeSpawner()
+    d = Dispatcher(spawner=spawner)
+
+    _aiorun(d.dispatch_deploy_diagnose("teach-me-eng-bot", failed.id))
+
+    prompt = spawner.calls[0][-1]
+    assert "goodsha" in prompt, "previous_good_sha must be in the bundle"
+    assert "badsha" in prompt
+
+
+def test_dispatch_diagnose_uses_opus_model_by_default(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    """Diagnose is reasoning-heavy — never downgrade to sonnet, even if the
+    project's config has downgrade_low_priority set. There is no priority
+    label on a deployment row."""
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    failed = _record_failed_deployment()
+    spawner = FakeSpawner()
+    d = Dispatcher(spawner=spawner)
+
+    _aiorun(d.dispatch_deploy_diagnose("teach-me-eng-bot", failed.id))
+
+    args = spawner.calls[0]
+    model_idx = args.index("--model")
+    assert args[model_idx + 1] == "claude-opus-4-7"
+
+
+def test_dispatch_diagnose_records_issue_zero_with_deployment_id(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    """Dispatch row uses issue=0 sentinel but carries the deployment_id so
+    the audit trail is unambiguous."""
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    failed = _record_failed_deployment()
+    d = Dispatcher(spawner=FakeSpawner(exit_code=0))
+
+    result = _aiorun(d.dispatch_deploy_diagnose("teach-me-eng-bot", failed.id))
+
+    rows = state.recent_dispatches(project="teach-me-eng-bot")
+    diag = next(r for r in rows if r.id == result.dispatch_id)
+    assert diag.issue == 0
+    assert diag.stage == "deploy-diagnose"
+    assert diag.deployment_id == failed.id
+    assert diag.triggered_by == f"auto:deploy-failure-{failed.id}"
+
+
+def test_dispatch_diagnose_links_deployment_row(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    """The deployments row gets `diagnose_dispatch_id` set so the dashboard
+    can navigate from a failure to its diagnose log."""
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    failed = _record_failed_deployment()
+    d = Dispatcher(spawner=FakeSpawner(exit_code=0))
+
+    result = _aiorun(d.dispatch_deploy_diagnose("teach-me-eng-bot", failed.id))
+
+    refreshed = state.get_deployment(failed.id)
+    assert refreshed is not None
+    assert refreshed.diagnose_dispatch_id == result.dispatch_id
+
+
+def test_dispatch_diagnose_raises_on_unknown_deployment(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    d = Dispatcher(spawner=FakeSpawner())
+    with pytest.raises(DispatchError, match="deployment 9999 not found"):
+        _aiorun(d.dispatch_deploy_diagnose("teach-me-eng-bot", 9999))
+
+
+def test_dispatch_diagnose_rejects_cross_project_deployment(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    """A deployment id that exists but belongs to a different project must
+    not be diagnosed under the wrong name — that would render the wrong repo
+    paths and file the issue against the wrong tracker."""
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    state.upsert_project(name="other", path="/q", repo="me/other")
+    other_failure = state.record_deployment(
+        project="other", sha="x", status="failed",
+    )
+    d = Dispatcher(spawner=FakeSpawner())
+    with pytest.raises(DispatchError, match="belongs to project 'other'"):
+        _aiorun(d.dispatch_deploy_diagnose("teach-me-eng-bot", other_failure.id))
+
+
+def test_dispatch_diagnose_respects_daily_quota(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    failed = _record_failed_deployment()
+    # good.yaml fixture caps at 30/day
+    for _ in range(30):
+        state.inc_quota("teach-me-eng-bot")
+    d = Dispatcher(spawner=FakeSpawner())
+    with pytest.raises(QuotaExceeded):
+        _aiorun(d.dispatch_deploy_diagnose("teach-me-eng-bot", failed.id))

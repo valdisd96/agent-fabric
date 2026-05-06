@@ -36,6 +36,7 @@ SKILL_NAMES: tuple[str, ...] = (
     "clarify-issue",
     "epic-decompose",
     "qualify-issue",
+    "deploy-diagnose",
 )
 
 SKILL_TEMPLATE_FILENAME = "SKILL.md.j2"
