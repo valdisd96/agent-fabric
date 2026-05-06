@@ -14,19 +14,25 @@ from fabric.state import (
     delete_project,
     delete_setting,
     dispatches_for_issue,
+    get_deployment,
     get_issue,
     get_project,
     get_setting,
     inc_quota,
     init_db,
+    latest_deployment,
     latest_dispatch,
+    list_deployments,
     list_issues,
     list_projects,
     list_unacked_notifications,
+    previous_successful_deployment,
     quota_today,
     recent_dispatches,
+    record_deployment,
     record_dispatch,
     set_cycle_count,
+    set_deployment_diagnose_dispatch,
     set_project_last_served,
     set_project_paused,
     set_setting,
@@ -415,6 +421,174 @@ def test_acknowledge_notification_raises_when_missing(isolated_state_db: Path) -
         acknowledge_notification(9999)
 
 
+# ---------- deployments ----------
+
+
+def test_record_deployment_returns_row_and_round_trips(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    dep = record_deployment(
+        project="t",
+        sha="abc1234deadbeef",
+        short_sha="abc1234",
+        status="success",
+        deployed_at="2026-05-06T18:00:00+00:00",
+        branch="main",
+        actor="valdisd96",
+        workflow_run_url="https://github.com/me/t/actions/runs/123",
+    )
+    assert isinstance(dep.id, int) and dep.id > 0
+    assert dep.sha == "abc1234deadbeef"
+    assert dep.diagnose_dispatch_id is None
+
+    # Returned row matches what get_deployment fetches back.
+    fetched = get_deployment(dep.id)
+    assert fetched == dep
+
+
+def test_record_deployment_failure_keeps_journal(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    dep = record_deployment(
+        project="t",
+        sha="def5678",
+        status="failed",
+        deployed_at="2026-05-06T18:05:00+00:00",
+        service_unit="t.service",
+        journal_tail="Traceback (most recent call last)\nModuleNotFoundError: redis",
+        workflow_run_url="https://github.com/me/t/actions/runs/124",
+    )
+    assert dep.status == "failed"
+    assert dep.journal_tail is not None and "ModuleNotFoundError" in dep.journal_tail
+    assert dep.service_unit == "t.service"
+
+
+def test_record_deployment_rejects_bad_status(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    with pytest.raises(StateError, match="must be 'success' or 'failed'"):
+        record_deployment(project="t", sha="abc", status="weird")
+
+
+def test_get_deployment_returns_none_for_unknown(isolated_state_db: Path) -> None:
+    assert get_deployment(9999) is None
+
+
+def test_list_deployments_orders_newest_first(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    record_deployment(
+        project="t", sha="aaa", status="success",
+        deployed_at="2026-05-01T10:00:00+00:00",
+    )
+    record_deployment(
+        project="t", sha="bbb", status="failed",
+        deployed_at="2026-05-02T10:00:00+00:00",
+    )
+    record_deployment(
+        project="t", sha="ccc", status="success",
+        deployed_at="2026-05-03T10:00:00+00:00",
+    )
+    rows = list_deployments("t")
+    assert [r.sha for r in rows] == ["ccc", "bbb", "aaa"]
+
+
+def test_list_deployments_filters_by_status(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    record_deployment(
+        project="t", sha="ok1", status="success",
+        deployed_at="2026-05-01T10:00:00+00:00",
+    )
+    record_deployment(
+        project="t", sha="bad1", status="failed",
+        deployed_at="2026-05-02T10:00:00+00:00",
+    )
+    record_deployment(
+        project="t", sha="ok2", status="success",
+        deployed_at="2026-05-03T10:00:00+00:00",
+    )
+    success_only = list_deployments("t", status="success")
+    failed_only = list_deployments("t", status="failed")
+    assert [r.sha for r in success_only] == ["ok2", "ok1"]
+    assert [r.sha for r in failed_only] == ["bad1"]
+
+
+def test_list_deployments_respects_limit(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    for i in range(5):
+        record_deployment(
+            project="t", sha=f"sha{i}", status="success",
+            deployed_at=f"2026-05-0{i + 1}T10:00:00+00:00",
+        )
+    assert len(list_deployments("t", limit=2)) == 2
+
+
+def test_latest_deployment_returns_most_recent(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    record_deployment(
+        project="t", sha="ok", status="success",
+        deployed_at="2026-05-01T10:00:00+00:00",
+    )
+    record_deployment(
+        project="t", sha="bad", status="failed",
+        deployed_at="2026-05-02T10:00:00+00:00",
+    )
+    # without filter — newest of any status
+    latest = latest_deployment("t")
+    assert latest is not None and latest.sha == "bad"
+    # filtered — newest success only
+    latest_ok = latest_deployment("t", status="success")
+    assert latest_ok is not None and latest_ok.sha == "ok"
+
+
+def test_latest_deployment_returns_none_when_empty(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    assert latest_deployment("t") is None
+    assert latest_deployment("t", status="success") is None
+
+
+def test_previous_successful_deployment(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    ok1 = record_deployment(
+        project="t", sha="ok1", status="success",
+        deployed_at="2026-05-01T10:00:00+00:00",
+    )
+    record_deployment(
+        project="t", sha="bad1", status="failed",
+        deployed_at="2026-05-02T10:00:00+00:00",
+    )
+    ok2 = record_deployment(
+        project="t", sha="ok2", status="success",
+        deployed_at="2026-05-03T10:00:00+00:00",
+    )
+    bad2 = record_deployment(
+        project="t", sha="bad2", status="failed",
+        deployed_at="2026-05-04T10:00:00+00:00",
+    )
+    # the failed bad2 should resolve to the most recent prior success: ok2
+    prev = previous_successful_deployment("t", before_id=bad2.id)
+    assert prev is not None and prev.id == ok2.id
+
+    # before ok1 there is no prior success
+    prev_before_ok1 = previous_successful_deployment("t", before_id=ok1.id)
+    assert prev_before_ok1 is None
+
+
+def test_set_deployment_diagnose_dispatch_links(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    dep = record_deployment(project="t", sha="bad", status="failed")
+    dispatch_id = record_dispatch(
+        project="t", issue=42, stage="deploy-diagnose",
+        triggered_by="auto:deploy-failure",
+    )
+    set_deployment_diagnose_dispatch(dep.id, dispatch_id)
+    row = get_deployment(dep.id)
+    assert row is not None and row.diagnose_dispatch_id == dispatch_id
+
+
+def test_set_deployment_diagnose_dispatch_raises_when_missing(
+    isolated_state_db: Path,
+) -> None:
+    with pytest.raises(StateError, match="not found"):
+        set_deployment_diagnose_dispatch(9999, 1)
+
+
 # ---------- foreign-key cascade ----------
 
 
@@ -424,6 +598,7 @@ def test_delete_project_cascades(isolated_state_db: Path) -> None:
     record_dispatch(project="t", issue=1, stage="plan-exec")
     add_notification(kind="blocked", project="t", issue=1)
     inc_quota("t", day="2026-05-04")
+    record_deployment(project="t", sha="abc", status="success")
 
     delete_project("t")
 
@@ -431,3 +606,4 @@ def test_delete_project_cascades(isolated_state_db: Path) -> None:
     assert recent_dispatches(project="t") == []
     assert list_unacked_notifications() == []
     assert quota_today("t", day="2026-05-04") == 0
+    assert list_deployments("t") == []

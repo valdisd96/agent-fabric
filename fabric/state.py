@@ -68,6 +68,22 @@ class DispatchRow:
 
 
 @dataclass(frozen=True)
+class DeploymentRow:
+    id: int
+    project: str
+    sha: str
+    status: str
+    deployed_at: str
+    short_sha: str | None = None
+    branch: str | None = None
+    actor: str | None = None
+    workflow_run_url: str | None = None
+    service_unit: str | None = None
+    journal_tail: str | None = None
+    diagnose_dispatch_id: int | None = None
+
+
+@dataclass(frozen=True)
 class NotificationRow:
     id: int
     kind: str
@@ -174,11 +190,36 @@ ALTER TABLE notifications ADD COLUMN body TEXT;
 """
 
 
+_SCHEMA_V5 = """
+CREATE TABLE deployments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  short_sha TEXT,
+  status TEXT NOT NULL,
+  deployed_at TEXT NOT NULL,
+  branch TEXT,
+  actor TEXT,
+  workflow_run_url TEXT,
+  service_unit TEXT,
+  journal_tail TEXT,
+  diagnose_dispatch_id INTEGER,
+  FOREIGN KEY (project) REFERENCES projects(name) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_deployments_project_time
+  ON deployments(project, deployed_at);
+CREATE INDEX idx_deployments_project_status
+  ON deployments(project, status, deployed_at);
+"""
+
+
 _MIGRATIONS: list[tuple[int, str]] = [
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
     (3, _SCHEMA_V3),
     (4, _SCHEMA_V4),
+    (5, _SCHEMA_V5),
 ]
 
 
@@ -524,6 +565,143 @@ def recent_dispatches(*, project: str | None = None, limit: int = 50) -> list[Di
         return [DispatchRow(**dict(r)) for r in rows]
 
 
+# ---- deployments DAO ----
+
+
+_DEPLOYMENT_COLS = (
+    "id, project, sha, short_sha, status, deployed_at, branch, actor, "
+    "workflow_run_url, service_unit, journal_tail, diagnose_dispatch_id"
+)
+
+
+def record_deployment(
+    *,
+    project: str,
+    sha: str,
+    status: str,
+    deployed_at: str | None = None,
+    short_sha: str | None = None,
+    branch: str | None = None,
+    actor: str | None = None,
+    workflow_run_url: str | None = None,
+    service_unit: str | None = None,
+    journal_tail: str | None = None,
+) -> DeploymentRow:
+    """Insert a deployment row. `status` is 'success' or 'failed'.
+
+    Returns the persisted row. Caller links a `diagnose_dispatch_id` later
+    via `set_deployment_diagnose_dispatch` once the diagnose run has been
+    started (forward-looking — see Decision 15).
+    """
+    if status not in ("success", "failed"):
+        raise StateError(f"deployment status must be 'success' or 'failed', got {status!r}")
+    ts = deployed_at or _utc_now()
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO deployments (project, sha, short_sha, status, deployed_at, "
+            "                         branch, actor, workflow_run_url, service_unit, "
+            "                         journal_tail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                project,
+                sha,
+                short_sha,
+                status,
+                ts,
+                branch,
+                actor,
+                workflow_run_url,
+                service_unit,
+                journal_tail,
+            ),
+        )
+        conn.commit()
+        if cur.lastrowid is None:
+            raise StateError("INSERT into deployments returned no rowid")
+    return DeploymentRow(
+        id=cur.lastrowid,
+        project=project,
+        sha=sha,
+        short_sha=short_sha,
+        status=status,
+        deployed_at=ts,
+        branch=branch,
+        actor=actor,
+        workflow_run_url=workflow_run_url,
+        service_unit=service_unit,
+        journal_tail=journal_tail,
+    )
+
+
+def set_deployment_diagnose_dispatch(deployment_id: int, dispatch_id: int) -> None:
+    """Link a deployment failure to the diagnose dispatch we kicked off for it."""
+    with connect() as conn:
+        result = conn.execute(
+            "UPDATE deployments SET diagnose_dispatch_id = ? WHERE id = ?",
+            (dispatch_id, deployment_id),
+        )
+        if result.rowcount == 0:
+            raise StateError(f"deployment {deployment_id} not found")
+        conn.commit()
+
+
+def get_deployment(deployment_id: int) -> DeploymentRow | None:
+    with connect() as conn:
+        row = conn.execute(
+            f"SELECT {_DEPLOYMENT_COLS} FROM deployments WHERE id = ?",
+            (deployment_id,),
+        ).fetchone()
+        return DeploymentRow(**dict(row)) if row else None
+
+
+def list_deployments(
+    project: str, *, limit: int = 50, status: str | None = None
+) -> list[DeploymentRow]:
+    """Newest-first deployment history for one project, optionally filtered by status."""
+    with connect() as conn:
+        if status is None:
+            rows = conn.execute(
+                f"SELECT {_DEPLOYMENT_COLS} FROM deployments WHERE project = ? "
+                "ORDER BY deployed_at DESC, id DESC LIMIT ?",
+                (project, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT {_DEPLOYMENT_COLS} FROM deployments "
+                "WHERE project = ? AND status = ? "
+                "ORDER BY deployed_at DESC, id DESC LIMIT ?",
+                (project, status, limit),
+            ).fetchall()
+        return [DeploymentRow(**dict(r)) for r in rows]
+
+
+def latest_deployment(
+    project: str, *, status: str | None = None
+) -> DeploymentRow | None:
+    """Most recent deployment for a project, optionally filtered by status.
+
+    `status='success'` answers "what's currently running"; the unfiltered
+    form answers "what was the most recent attempt, success or failure".
+    """
+    rows = list_deployments(project, limit=1, status=status)
+    return rows[0] if rows else None
+
+
+def previous_successful_deployment(
+    project: str, *, before_id: int
+) -> DeploymentRow | None:
+    """Last successful deploy strictly before `before_id`. Used by deploy-diagnose
+    to compute the `git log <last_good>..<failed>` range."""
+    with connect() as conn:
+        row = conn.execute(
+            f"SELECT {_DEPLOYMENT_COLS} FROM deployments "
+            "WHERE project = ? AND status = 'success' AND id < ? "
+            "ORDER BY id DESC LIMIT 1",
+            (project, before_id),
+        ).fetchone()
+        return DeploymentRow(**dict(row)) if row else None
+
+
 # ---- quota DAO ----
 
 
@@ -622,6 +800,7 @@ def find_notification_by_tg_message(
 
 
 __all__ = [
+    "DeploymentRow",
     "DispatchRow",
     "IssueRow",
     "NotificationRow",
@@ -636,19 +815,25 @@ __all__ = [
     "delete_setting",
     "dispatches_for_issue",
     "find_notification_by_tg_message",
+    "get_deployment",
     "get_issue",
     "get_project",
     "get_setting",
     "inc_quota",
     "init_db",
+    "latest_deployment",
     "latest_dispatch",
+    "list_deployments",
     "list_issues",
     "list_projects",
     "list_unacked_notifications",
+    "previous_successful_deployment",
     "quota_today",
     "recent_dispatches",
+    "record_deployment",
     "record_dispatch",
     "set_cycle_count",
+    "set_deployment_diagnose_dispatch",
     "set_notification_tg_message",
     "set_project_last_served",
     "set_project_paused",

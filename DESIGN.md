@@ -566,13 +566,19 @@ machine-applied manifest — it's a runbook the agent (and humans) read.
 | `examples/github-actions/deploy.yml` | Reusable workflow — copied into managed projects, five `CONFIGURE:` values filled per project. |
 | `examples/runbooks/deploy-setup.md` | One-time provisioning runbook (runner registration, install dir ownership, sudoers, deploy state dir). |
 | `/var/lib/<project>/deploy.json` | Per-project current-deploy manifest written by the workflow; read by fabric to surface in `/status`. |
-| `POST /api/projects/<name>/deployments` | Fabric REST endpoint (forward-looking) where the workflow records successes. |
-| `POST /api/projects/<name>/deploy-failures` | Fabric REST endpoint (forward-looking) where the workflow records failures; triggers `deploy-diagnose`. |
+| `POST /api/projects/<name>/deployments` | Fabric REST endpoint where the workflow records successes (returns the persisted `DeploymentOut`). |
+| `POST /api/projects/<name>/deploy-failures` | Fabric REST endpoint where the workflow records failures; will trigger `deploy-diagnose` once that skill lands. |
+| `GET /api/projects/<name>/deployments[?status=]` | Newest-first deployment history; `?status=success` or `failed` to filter. |
+| `GET /api/projects/<name>/deployments/latest[?status=]` | Most recent deployment. Default `status=success` answers "what's currently running" — what an agent reads to ground its work. |
 | `fabric/skill_templates/deploy-diagnose/` | Skill template (forward-looking) — the agent's failure-reading playbook. |
 
-The workflow is shipped now and tolerates fabric not being wired (notify
-steps detect missing `FABRIC_DEPLOY_URL` and skip). The fabric-side
-endpoints + `deploy-diagnose` skill land in a follow-up.
+The workflow and the four REST endpoints (plus the `deployments` table at
+`schema_version=5`) are shipped. The workflow tolerates fabric not being
+wired (notify steps detect missing `FABRIC_DEPLOY_URL` and skip), so projects
+can adopt auto-deploy before subscribing to fabric. The `deploy-diagnose`
+skill template + the auto-dispatch wiring on `deploy-failures` land in a
+follow-up; the failure endpoint already persists the bundle the diagnose
+pass will read.
 
 ### Decision 14 — CLI modes
 

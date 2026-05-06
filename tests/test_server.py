@@ -304,6 +304,165 @@ def test_post_merge_calls_gh(client: TestClient, setup: dict[str, Any]) -> None:
     assert any("--squash" in c for c in setup["gh_runner"].calls)
 
 
+# ---------- deployments ----------
+
+
+def test_post_deployment_records_success(client: TestClient) -> None:
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    r = client.post(
+        "/api/projects/teach-me-eng-bot/deployments",
+        json={
+            "sha": "abc1234deadbeef",
+            "short_sha": "abc1234",
+            "deployed_at": "2026-05-06T18:00:00+00:00",
+            "branch": "main",
+            "actor": "valdisd96",
+            "workflow_run_url": "https://github.com/me/x/actions/runs/1",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "success"
+    assert body["sha"] == "abc1234deadbeef"
+    assert body["short_sha"] == "abc1234"
+    assert body["actor"] == "valdisd96"
+    assert body["id"] > 0
+
+
+def test_post_deployment_404_unknown_project(client: TestClient) -> None:
+    r = client.post(
+        "/api/projects/nope/deployments",
+        json={"sha": "abc", "deployed_at": "2026-05-06T18:00:00+00:00"},
+    )
+    assert r.status_code == 404
+
+
+def test_post_deployment_rejects_extra_fields(client: TestClient) -> None:
+    """Pydantic extra='forbid' — typos in the workflow's payload should 422,
+    not silently drop the field."""
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    r = client.post(
+        "/api/projects/teach-me-eng-bot/deployments",
+        json={
+            "sha": "abc",
+            "deployed_at": "2026-05-06T18:00:00+00:00",
+            "unexpected_typo": "x",
+        },
+    )
+    assert r.status_code == 422
+
+
+def test_post_deploy_failure_records_failed(client: TestClient) -> None:
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    r = client.post(
+        "/api/projects/teach-me-eng-bot/deploy-failures",
+        json={
+            "sha": "def5678",
+            "workflow_run_url": "https://github.com/me/x/actions/runs/2",
+            "service_unit": "teach-me-eng-bot.service",
+            "journal_tail": "ModuleNotFoundError: redis",
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "failed"
+    assert body["sha"] == "def5678"
+    assert body["journal_tail"] == "ModuleNotFoundError: redis"
+    assert body["diagnose_dispatch_id"] is None  # diagnose wiring is a follow-up
+
+
+def test_post_deploy_failure_404_unknown_project(client: TestClient) -> None:
+    r = client.post(
+        "/api/projects/nope/deploy-failures",
+        json={"sha": "abc"},
+    )
+    assert r.status_code == 404
+
+
+def test_get_deployments_empty(client: TestClient) -> None:
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    r = client.get("/api/projects/teach-me-eng-bot/deployments")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_get_deployments_orders_newest_first(client: TestClient) -> None:
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    state.record_deployment(
+        project="teach-me-eng-bot", sha="aaa", status="success",
+        deployed_at="2026-05-01T10:00:00+00:00",
+    )
+    state.record_deployment(
+        project="teach-me-eng-bot", sha="bbb", status="failed",
+        deployed_at="2026-05-02T10:00:00+00:00",
+    )
+    r = client.get("/api/projects/teach-me-eng-bot/deployments")
+    assert r.status_code == 200
+    rows = r.json()
+    assert [row["sha"] for row in rows] == ["bbb", "aaa"]
+
+
+def test_get_deployments_filters_by_status(client: TestClient) -> None:
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    state.record_deployment(
+        project="teach-me-eng-bot", sha="ok", status="success",
+        deployed_at="2026-05-01T10:00:00+00:00",
+    )
+    state.record_deployment(
+        project="teach-me-eng-bot", sha="bad", status="failed",
+        deployed_at="2026-05-02T10:00:00+00:00",
+    )
+    r = client.get("/api/projects/teach-me-eng-bot/deployments?status=failed")
+    assert r.status_code == 200
+    rows = r.json()
+    assert [row["sha"] for row in rows] == ["bad"]
+
+
+def test_get_deployments_404_unknown_project(client: TestClient) -> None:
+    r = client.get("/api/projects/nope/deployments")
+    assert r.status_code == 404
+
+
+def test_get_latest_deployment_404_when_none(client: TestClient) -> None:
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    r = client.get("/api/projects/teach-me-eng-bot/deployments/latest")
+    assert r.status_code == 404
+
+
+def test_get_latest_deployment_defaults_to_success(client: TestClient) -> None:
+    """Default `status=success` answers 'what's currently running'."""
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    state.record_deployment(
+        project="teach-me-eng-bot", sha="ok", status="success",
+        deployed_at="2026-05-01T10:00:00+00:00",
+    )
+    state.record_deployment(
+        project="teach-me-eng-bot", sha="bad", status="failed",
+        deployed_at="2026-05-02T10:00:00+00:00",
+    )
+    r = client.get("/api/projects/teach-me-eng-bot/deployments/latest")
+    assert r.status_code == 200
+    assert r.json()["sha"] == "ok"
+
+
+def test_get_latest_deployment_blank_status_includes_failures(
+    client: TestClient,
+) -> None:
+    """Empty `?status=` returns the most recent of any status."""
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    state.record_deployment(
+        project="teach-me-eng-bot", sha="ok", status="success",
+        deployed_at="2026-05-01T10:00:00+00:00",
+    )
+    state.record_deployment(
+        project="teach-me-eng-bot", sha="bad", status="failed",
+        deployed_at="2026-05-02T10:00:00+00:00",
+    )
+    r = client.get("/api/projects/teach-me-eng-bot/deployments/latest?status=")
+    assert r.status_code == 200
+    assert r.json()["sha"] == "bad"
+
+
 # ---------- websocket ----------
 
 

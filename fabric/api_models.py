@@ -90,6 +90,21 @@ class DispatchSubmittedOut(_ApiModel):
     duration_s: float
 
 
+class DeploymentOut(_ApiModel):
+    id: int
+    project: str
+    sha: str
+    short_sha: str | None = None
+    status: str
+    deployed_at: str
+    branch: str | None = None
+    actor: str | None = None
+    workflow_run_url: str | None = None
+    service_unit: str | None = None
+    journal_tail: str | None = None
+    diagnose_dispatch_id: int | None = None
+
+
 # ---- request shapes ----
 
 
@@ -121,9 +136,38 @@ class PauseRequest(_ApiModel):
     reason: str | None = None
 
 
+class DeploymentRecordRequest(_ApiModel):
+    """Body posted by the deploy workflow on a successful deploy.
+
+    Mirrors the JSON written to `/var/lib/<project>/deploy.json`.
+    """
+    sha: str
+    short_sha: str | None = None
+    deployed_at: str
+    branch: str | None = None
+    actor: str | None = None
+    workflow_run_url: str | None = None
+
+
+class DeployFailureRequest(_ApiModel):
+    """Body posted by the deploy workflow when a deploy fails.
+
+    The fabric records the failure and (forward-looking) auto-dispatches
+    the `deploy-diagnose` skill against this bundle.
+    """
+    sha: str
+    workflow_run_url: str | None = None
+    service_unit: str | None = None
+    journal_tail: str | None = None
+    status: str = "failed"
+
+
 __all__ = [
     "CommentOut",
     "CommentRequest",
+    "DeployFailureRequest",
+    "DeploymentOut",
+    "DeploymentRecordRequest",
     "DispatchOut",
     "DispatchRequest",
     "DispatchSubmittedOut",
