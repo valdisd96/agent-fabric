@@ -129,6 +129,23 @@ def _dispatch_to_out(r: state.DispatchRow) -> am.DispatchOut:
     )
 
 
+def _deployment_to_out(r: state.DeploymentRow) -> am.DeploymentOut:
+    return am.DeploymentOut(
+        id=r.id,
+        project=r.project,
+        sha=r.sha,
+        short_sha=r.short_sha,
+        status=r.status,
+        deployed_at=r.deployed_at,
+        branch=r.branch,
+        actor=r.actor,
+        workflow_run_url=r.workflow_run_url,
+        service_unit=r.service_unit,
+        journal_tail=r.journal_tail,
+        diagnose_dispatch_id=r.diagnose_dispatch_id,
+    )
+
+
 def _wire_routes(
     app: FastAPI,
     *,
@@ -172,6 +189,93 @@ def _wire_routes(
         if row is None:
             raise HTTPException(404, f"issue {project}#{number} not found")
         return _issue_to_out(row)
+
+    @app.get(
+        "/api/projects/{project}/deployments",
+        response_model=list[am.DeploymentOut],
+    )
+    async def list_deployments(
+        project: str, limit: int = 50, status: str | None = None
+    ) -> list[am.DeploymentOut]:
+        _require_project(project)
+        rows = await asyncio.to_thread(
+            state.list_deployments, project, limit=limit, status=status
+        )
+        return [_deployment_to_out(r) for r in rows]
+
+    @app.get(
+        "/api/projects/{project}/deployments/latest",
+        response_model=am.DeploymentOut,
+    )
+    async def latest_deployment(
+        project: str, status: str | None = "success"
+    ) -> am.DeploymentOut:
+        """Return the latest deployment for `project`. Defaults to status='success'
+        — i.e. "what is currently running" — but accepts `?status=failed` or
+        `?status=` (blank) to query the most recent attempt of any status."""
+        _require_project(project)
+        normalized = status if status else None
+        row = await asyncio.to_thread(
+            state.latest_deployment, project, status=normalized
+        )
+        if row is None:
+            qualifier = f" with status={normalized}" if normalized else ""
+            raise HTTPException(
+                404, f"no deployments recorded for {project}{qualifier}"
+            )
+        return _deployment_to_out(row)
+
+    @app.post(
+        "/api/projects/{project}/deployments",
+        response_model=am.DeploymentOut,
+    )
+    async def post_deployment(
+        project: str, req: am.DeploymentRecordRequest
+    ) -> am.DeploymentOut:
+        """Record a successful deploy. Posted by the deploy workflow after
+        the smoke check passes (see examples/github-actions/deploy.yml)."""
+        _require_project(project)
+        deployment = await asyncio.to_thread(
+            state.record_deployment,
+            project=project,
+            sha=req.sha,
+            short_sha=req.short_sha,
+            status="success",
+            deployed_at=req.deployed_at,
+            branch=req.branch,
+            actor=req.actor,
+            workflow_run_url=req.workflow_run_url,
+        )
+        return _deployment_to_out(deployment)
+
+    @app.post(
+        "/api/projects/{project}/deploy-failures",
+        response_model=am.DeploymentOut,
+    )
+    async def post_deploy_failure(
+        project: str, req: am.DeployFailureRequest
+    ) -> am.DeploymentOut:
+        """Record a failed deploy. The deploy-diagnose skill auto-dispatch
+        against this row is a follow-up — for now we just persist the bundle
+        so the future diagnose pass has the data it needs."""
+        _require_project(project)
+        deployment = await asyncio.to_thread(
+            state.record_deployment,
+            project=project,
+            sha=req.sha,
+            status="failed",
+            workflow_run_url=req.workflow_run_url,
+            service_unit=req.service_unit,
+            journal_tail=req.journal_tail,
+        )
+        log.warning(
+            "deploy failed: project=%s sha=%s deployment_id=%s "
+            "— diagnose dispatch wiring pending",
+            project,
+            req.sha,
+            deployment.id,
+        )
+        return _deployment_to_out(deployment)
 
     @app.get("/api/dispatches", response_model=list[am.DispatchOut])
     async def list_dispatches(
@@ -352,6 +456,13 @@ def _resolve_repo(project: str) -> str:
     if entry is None:
         raise HTTPException(404, f"project {project!r} not registered")
     return entry.repo
+
+
+def _require_project(project: str) -> None:
+    """404 if the project name isn't registered. Used on routes that don't
+    need the repo string but still want to fail loudly on typos."""
+    if find_project(project) is None:
+        raise HTTPException(404, f"project {project!r} not registered")
 
 
 __all__ = ["create_app"]
