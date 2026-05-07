@@ -8,7 +8,15 @@ The first project it manages is [`teach-me-eng-bot`](https://github.com/valdisd9
 
 ## Status
 
-Phase 0 (extract & generalize) — in progress. Phases tracked as GitHub issues.
+Phases 0 + 1 shipped. Phase 2 (HTMX dashboard) is the next milestone. See
+[`DESIGN.md`](./DESIGN.md) "Phased roadmap" and `CLAUDE.md` for the
+running phase log.
+
+For deploying onto a fresh VPS, follow the runbook in
+[`.claude/skills/install/SKILL.md`](./.claude/skills/install/SKILL.md)
+(or [`SMOKE.md`](./SMOKE.md) for the lighter conceptual pass). For
+adding a brand-new managed project on top of an already-running fabric,
+see [`.claude/skills/register-project/SKILL.md`](./.claude/skills/register-project/SKILL.md).
 
 ## Install (dev)
 
@@ -19,19 +27,25 @@ pip install -e ".[dev]"
 
 ## CLI
 
-| Command | Phase | Purpose |
-|---|---|---|
-| `fabric register <repo-path>` | 0A | Validate `<path>/.fabric/config.yaml` and add to `~/.fabric/projects.yaml`. |
-| `fabric sync <project> [--check]` | 0B | Re-render skill templates into `<project>/.claude/skills/`. `--check` exits non-zero on drift. |
-| `fabric tick` | 1 | One-shot poll-and-dispatch (debug). |
-| `fabric dispatch <project> <issue> <stage>` | 1 | Force-dispatch a stage. |
-| `fabric status` | 1 | Text dump of the current queue. |
-| `fabric pause [--reason]` / `fabric resume` | 1 | Toggle the global pause flag. |
-| `fabric logs <project> <issue> [--follow]` | 1 | Tail agent logs. |
+| Command | Purpose |
+|---|---|
+| `fabric register <repo-path>` | Validate `<path>/.fabric/config.yaml` and add to the project registry. |
+| `fabric sync <project> [--check]` | Re-render skill templates into `<project>/.claude/skills/`. `--check` exits non-zero on drift. |
+| `fabric setup-labels <project> [--check]` | Idempotently provision the canonical state/priority/type/area label set in the project's repo. |
+| `fabric tick` | One-shot poll-and-dispatch (debug). |
+| `fabric dispatch <project> <issue> <stage>` | Force-dispatch a pipeline stage on a specific issue. |
+| `fabric diagnose <project> <deployment-id>` | Manually run `deploy-diagnose` against a failed deployment (re-runs after a `docs/deploy.md` edit, or when auto-dispatch missed). |
+| `fabric status` | Text dump of the current queue + recent dispatches. |
+| `fabric pause [--reason]` / `fabric resume` | Toggle the global pause flag. |
+| `fabric logs <project> <issue> [--follow] [--pretty]` | Tail the latest dispatch log (raw JSONL or pretty transcript). |
+| `fabric server` | Run the long-running service (REST + WS + scheduler tick). What systemd executes. |
 
-Phase-1 commands are stubbed (exit code 2) until the scheduler/dispatcher land.
-
-`$FABRIC_HOME` overrides the default registry directory (`~/.fabric`); the systemd unit on the Pi sets it to `/var/lib/fabric`.
+`$FABRIC_HOME` overrides the default registry directory (`~/.fabric`);
+the systemd unit (see `scripts/install-systemd.sh`) sets it to
+`/var/lib/fabric`. Other env vars: `FABRIC_HOST`/`FABRIC_PORT` (REST
+bind, defaults `127.0.0.1:7878`), `FABRIC_TELEGRAM_TOKEN` +
+`FABRIC_TELEGRAM_CHAT_ID` (TG bot — both must be set or the bot is
+disabled with a one-line warning), `FABRIC_LOG_LEVEL` (default `INFO`).
 
 ## Drift CI for managed projects
 
