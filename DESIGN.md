@@ -601,10 +601,12 @@ less precision.
 | `fabric tick` | One-shot tick, exits. Dry-run mode by default unless `--apply`. |
 | `fabric register <path>` | Add project; validates `.fabric/config.yaml`; renders skills. |
 | `fabric sync <project> [--check]` | Re-render skills; `--check` exits non-zero if drift. |
+| `fabric setup-labels <project> [--check]` | Provision canonical state/priority/type/area labels in the project repo; `--check` exits non-zero on drift. |
 | `fabric dispatch <project> <issue> <stage>` | Force-dispatch, ignoring labels. |
+| `fabric diagnose <project> <deployment-id>` | Manually run `deploy-diagnose` against a failed deployment row (counterpart to the auto-dispatch from `POST /deploy-failures`). |
 | `fabric status` | Text dump (good for SSH-only sessions). |
 | `fabric pause [reason]` / `fabric resume` | Toggle pause flag. |
-| `fabric logs <project> <issue> [--follow]` | Tail agent logs. |
+| `fabric logs <project> <issue> [--follow] [--pretty]` | Tail agent logs (raw JSONL or pretty transcript). |
 
 ---
 

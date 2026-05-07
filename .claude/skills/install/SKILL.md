@@ -1,7 +1,7 @@
 ---
 name: install
 description: Step-by-step procedure for installing agent-fabric on a fresh Ubuntu 24.04 LTS VPS and registering the first managed project. Invoke when the user asks to "install", "deploy", "set up", "provision", or "bring up" agent-fabric on a server, VM, or VPS — or asks how to run it next to a managed project like teach-me-eng-bot. Project-internal; not rendered into managed projects by `fabric sync`.
-version: 1.1.0
+version: 1.2.0
 ---
 
 # install
@@ -123,7 +123,7 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install -e .
-fabric --help            # sanity check — must list 10 subcommands
+fabric --help            # sanity check — must list 11 subcommands
 deactivate
 ```
 
@@ -209,6 +209,12 @@ FABRIC_HOST=127.0.0.1
 FABRIC_PORT=7878
 FABRIC_TELEGRAM_TOKEN=<from BotFather, looks like 1234567890:AA…>
 FABRIC_TELEGRAM_CHAT_ID=<numeric, from @userinfobot>
+
+# Optional:
+# FABRIC_LOG_LEVEL=INFO              # DEBUG for ad-hoc troubleshooting
+# IS_SANDBOX=1                       # only if you deviate from User=fabric
+                                     # and run the unit as root — `claude`
+                                     # refuses to run as root otherwise
 ```
 
 File must end up `fabric:fabric, 0600`. If the editor changed ownership:
@@ -245,12 +251,18 @@ Common first-boot failures:
 
 `/srv/projects` was created by `install-systemd.sh` (Step 4) — fabric
 owned, mode 0750. Clone, configure, register, label, and sync as
-`fabric`:
+`fabric`.
+
+The block below is shaped for **teach-me-eng-bot** specifically — it
+copies the worked-example config from `examples/`. For any other project
+you need an authored `.fabric/config.yaml` first; see the
+`register-project` skill for the end-to-end "design a config from
+scratch + register" walkthrough.
 
 **Critical:** `sudo -u` does *not* load `/etc/fabric/env`, so `FABRIC_HOME`
 is unset by default and the CLI falls back to `~/.fabric/projects.yaml`
 — a path the systemd service does not read. Export it explicitly inside
-every `sudo -u fabric` block. As of fabric 0.1.x, `fabric` itself emits
+every `sudo -u fabric` block. As of fabric 0.2.x, `fabric` itself emits
 a stderr warning when this divergence is detected, so you'll notice
 quickly if the export is missed.
 
@@ -272,7 +284,7 @@ FABRIC=/srv/agent-fabric/.venv/bin/fabric
 "$FABRIC" register "$PROJECT"                     # prints registry path
 "$FABRIC" setup-labels <project-name> --check     # diff against repo
 "$FABRIC" setup-labels <project-name>             # apply
-"$FABRIC" sync <project-name>                     # render skills into .claude/skills/
+"$FABRIC" sync <project-name>                     # renders 7 skill templates into .claude/skills/
 EOF
 ```
 
