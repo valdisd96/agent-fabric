@@ -279,8 +279,16 @@ def test_post_dispatch_429_quota_exceeded(
     client: TestClient, setup: dict[str, Any]
 ) -> None:
     state.upsert_project(name="teach-me-eng-bot", path=str(setup["project"]), repo="me/x")
+    # good.yaml caps at 30 dispatches in 5h
+    from datetime import datetime, timedelta, timezone
+    inside = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(
+        timespec="seconds"
+    )
     for _ in range(30):
-        state.inc_quota("teach-me-eng-bot")
+        state.record_dispatch(
+            project="teach-me-eng-bot", issue=1, stage="plan-exec",
+            started_at=inside,
+        )
 
     r = client.post(
         "/api/issues/teach-me-eng-bot/1/dispatch",

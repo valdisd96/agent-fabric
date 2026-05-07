@@ -67,7 +67,13 @@ class Pipeline(_Strict):
     cycle_limit: int = Field(default=5, gt=0)
     retry_count: int = Field(default=3, ge=0)
     retry_backoff_seconds: list[int] = Field(default_factory=lambda: [60, 300, 900])
-    daily_dispatch_cap: int = Field(default=30, gt=0)
+    # Rolling-window cap: at most `dispatch_cap` dispatches in any
+    # `dispatch_window_hours`-long window. Tracks Anthropic's 5-hour rate
+    # limit by default (30/5h ≈ Pro plan headroom). Window is rolling, not
+    # session-based — slightly more conservative than what Anthropic enforces,
+    # which is fine for staying under the wall.
+    dispatch_cap: int = Field(default=30, gt=0)
+    dispatch_window_hours: int = Field(default=5, gt=0)
     downgrade_low_priority: bool = False
 
     @field_validator("retry_backoff_seconds")

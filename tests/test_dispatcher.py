@@ -247,7 +247,7 @@ def test_dispatch_records_started_completed_and_quota(
     assert latest.exit_code == 0
     assert latest.ended_at is not None
     assert latest.log_path is not None
-    assert state.quota_today("teach-me-eng-bot") == 1
+    assert state.dispatches_in_window("teach-me-eng-bot", 5) == 1
 
 
 def test_dispatch_propagates_nonzero_exit(
@@ -322,14 +322,45 @@ def test_dispatch_quota_cap_raises(
 ) -> None:
     project = _make_project(tmp_path / "proj")
     register(project)
-    # good.yaml's pipeline.daily_dispatch_cap == 30; pre-fill the quota
+    # good.yaml's pipeline.dispatch_cap == 30 over a 5h window; pre-fill 30
+    # dispatches inside the window so the next one trips the cap.
     state.upsert_project(name="teach-me-eng-bot", path=str(project), repo="me/x")
+    from datetime import datetime, timedelta, timezone
+    inside = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(
+        timespec="seconds"
+    )
     for _ in range(30):
-        state.inc_quota("teach-me-eng-bot")
+        state.record_dispatch(
+            project="teach-me-eng-bot", issue=1, stage="plan-exec",
+            started_at=inside,
+        )
 
     d = Dispatcher(spawner=FakeSpawner())
-    with pytest.raises(QuotaExceeded, match="30/30"):
+    with pytest.raises(QuotaExceeded, match=r"30/30 in last 5h"):
         _aiorun(d.dispatch("teach-me-eng-bot", 1, "plan-exec"))
+
+
+def test_dispatch_quota_window_refills(
+    isolated_state_db: Path, tmp_path: Path
+) -> None:
+    """Dispatches older than the rolling window should not count against the cap."""
+    project = _make_project(tmp_path / "proj")
+    register(project)
+    state.upsert_project(name="teach-me-eng-bot", path=str(project), repo="me/x")
+    from datetime import datetime, timedelta, timezone
+    # 30 old dispatches outside the 5h window — shouldn't block a new one.
+    aged_out = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat(
+        timespec="seconds"
+    )
+    for _ in range(30):
+        state.record_dispatch(
+            project="teach-me-eng-bot", issue=1, stage="plan-exec",
+            started_at=aged_out,
+        )
+
+    d = Dispatcher(spawner=FakeSpawner(exit_code=0))
+    res = _aiorun(d.dispatch("teach-me-eng-bot", 2, "plan-exec"))
+    assert res.exit_code == 0
 
 
 # ---------- model resolution ----------
@@ -374,8 +405,8 @@ def test_dispatch_downgrades_low_priority_when_flag_set(
     text = cfg_path.read_text()
     cfg_path.write_text(
         text.replace(
-            "daily_dispatch_cap: 30",
-            "daily_dispatch_cap: 30\n  downgrade_low_priority: true",
+            "dispatch_cap: 30",
+            "dispatch_cap: 30\n  downgrade_low_priority: true",
         )
     )
     register(project)
@@ -840,15 +871,22 @@ def test_dispatch_diagnose_rejects_cross_project_deployment(
         _aiorun(d.dispatch_deploy_diagnose("teach-me-eng-bot", other_failure.id))
 
 
-def test_dispatch_diagnose_respects_daily_quota(
+def test_dispatch_diagnose_respects_rolling_quota(
     isolated_state_db: Path, tmp_path: Path
 ) -> None:
     project = _make_project(tmp_path / "proj")
     register(project)
     failed = _record_failed_deployment()
-    # good.yaml fixture caps at 30/day
+    # good.yaml fixture caps at 30 in any 5h rolling window
+    from datetime import datetime, timedelta, timezone
+    inside = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(
+        timespec="seconds"
+    )
     for _ in range(30):
-        state.inc_quota("teach-me-eng-bot")
+        state.record_dispatch(
+            project="teach-me-eng-bot", issue=1, stage="plan-exec",
+            started_at=inside,
+        )
     d = Dispatcher(spawner=FakeSpawner())
     with pytest.raises(QuotaExceeded):
         _aiorun(d.dispatch_deploy_diagnose("teach-me-eng-bot", failed.id))

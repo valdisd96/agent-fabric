@@ -59,6 +59,9 @@ pipeline:
   cycle_limit: 5
   retry_count: 3
   retry_backoff_seconds: [60, 300, 900]
-  daily_dispatch_cap: 30
+  # At most 30 dispatches in any rolling 5-hour window — tracks Anthropic's
+  # subscription rate-limit shape so we stay under the wall.
+  dispatch_cap: 30
+  dispatch_window_hours: 5
 
-fabric_version: "0.1.0"
+fabric_version: "0.2.0"

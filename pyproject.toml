@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-fabric"
-version = "0.1.0"
+version = "0.2.0"
 description = "Multi-project agent fabric — drives the plan-exec → test-writer → review-pr Claude pipeline across N repos."
 readme = "README.md"
 requires-python = ">=3.12"

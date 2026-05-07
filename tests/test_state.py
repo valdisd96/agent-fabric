@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -14,11 +15,11 @@ from fabric.state import (
     delete_project,
     delete_setting,
     dispatches_for_issue,
+    dispatches_in_window,
     get_deployment,
     get_issue,
     get_project,
     get_setting,
-    inc_quota,
     init_db,
     latest_deployment,
     latest_dispatch,
@@ -27,7 +28,6 @@ from fabric.state import (
     list_projects,
     list_unacked_notifications,
     previous_successful_deployment,
-    quota_today,
     recent_dispatches,
     record_deployment,
     record_dispatch,
@@ -58,7 +58,6 @@ def test_init_db_creates_tables(isolated_fabric_home: Path) -> None:
         "issues",
         "dispatches",
         "notifications",
-        "quota_log",
         "settings",
     }
     with connect(p) as conn:
@@ -67,6 +66,8 @@ def test_init_db_creates_tables(isolated_fabric_home: Path) -> None:
         ).fetchall()
     found = {r["name"] for r in rows}
     assert expected.issubset(found)
+    # quota_log was dropped in v7 — rolling-window cap reads from dispatches.
+    assert "quota_log" not in found
 
 
 def test_init_db_records_schema_version(isolated_state_db: Path) -> None:
@@ -363,28 +364,60 @@ def test_recent_dispatches_orders_desc(isolated_state_db: Path) -> None:
     assert [(r.project, r.issue) for r in a_rows] == [("a", 2), ("a", 1)]
 
 
-# ---------- quota ----------
+# ---------- quota (rolling window) ----------
 
 
-def test_inc_quota_increments(isolated_state_db: Path) -> None:
+def test_dispatches_in_window_returns_zero_when_empty(isolated_state_db: Path) -> None:
     upsert_project(name="t", path="/p", repo="me/t")
-    assert inc_quota("t", day="2026-05-04") == 1
-    assert inc_quota("t", day="2026-05-04") == 2
-    assert quota_today("t", day="2026-05-04") == 2
+    assert dispatches_in_window("t", 5) == 0
 
 
-def test_quota_today_returns_zero_when_missing(isolated_state_db: Path) -> None:
+def test_dispatches_in_window_counts_recent(isolated_state_db: Path) -> None:
     upsert_project(name="t", path="/p", repo="me/t")
-    assert quota_today("t", day="2026-05-04") == 0
+    now = datetime(2026, 5, 7, 18, 0, tzinfo=timezone.utc)
+    # Three dispatches inside the last 5h, one just outside, one well past.
+    inside = [now - timedelta(hours=h) for h in (0, 1, 4)]
+    outside = [now - timedelta(hours=5, minutes=1), now - timedelta(hours=10)]
+    for ts in inside + outside:
+        record_dispatch(
+            project="t", issue=1, stage="plan-exec",
+            started_at=ts.isoformat(timespec="seconds"),
+        )
+    assert dispatches_in_window("t", 5, now=now) == 3
+    assert dispatches_in_window("t", 24, now=now) == 5
 
 
-def test_quota_isolated_per_day(isolated_state_db: Path) -> None:
+def test_dispatches_in_window_isolated_per_project(isolated_state_db: Path) -> None:
+    upsert_project(name="a", path="/p", repo="me/a")
+    upsert_project(name="b", path="/p", repo="me/b")
+    now = datetime(2026, 5, 7, 18, 0, tzinfo=timezone.utc)
+    started_at = (now - timedelta(hours=1)).isoformat(timespec="seconds")
+    record_dispatch(project="a", issue=1, stage="plan-exec", started_at=started_at)
+    record_dispatch(project="a", issue=2, stage="plan-exec", started_at=started_at)
+    record_dispatch(project="b", issue=1, stage="plan-exec", started_at=started_at)
+
+    assert dispatches_in_window("a", 5, now=now) == 2
+    assert dispatches_in_window("b", 5, now=now) == 1
+
+
+def test_dispatches_in_window_counts_in_flight(isolated_state_db: Path) -> None:
+    """In-flight rows (ended_at NULL) still consume the window — they're using
+    the API right now."""
     upsert_project(name="t", path="/p", repo="me/t")
-    inc_quota("t", day="2026-05-03")
-    inc_quota("t", day="2026-05-04")
-    inc_quota("t", day="2026-05-04")
-    assert quota_today("t", day="2026-05-03") == 1
-    assert quota_today("t", day="2026-05-04") == 2
+    now = datetime(2026, 5, 7, 18, 0, tzinfo=timezone.utc)
+    record_dispatch(
+        project="t", issue=1, stage="plan-exec",
+        started_at=(now - timedelta(minutes=30)).isoformat(timespec="seconds"),
+    )
+    assert dispatches_in_window("t", 5, now=now) == 1
+
+
+def test_dispatches_in_window_rejects_non_positive_hours(isolated_state_db: Path) -> None:
+    upsert_project(name="t", path="/p", repo="me/t")
+    with pytest.raises(StateError, match="positive"):
+        dispatches_in_window("t", 0)
+    with pytest.raises(StateError, match="positive"):
+        dispatches_in_window("t", -1)
 
 
 # ---------- notifications ----------
@@ -597,7 +630,6 @@ def test_delete_project_cascades(isolated_state_db: Path) -> None:
     upsert_issue(project="t", number=1)
     record_dispatch(project="t", issue=1, stage="plan-exec")
     add_notification(kind="blocked", project="t", issue=1)
-    inc_quota("t", day="2026-05-04")
     record_deployment(project="t", sha="abc", status="success")
 
     delete_project("t")
@@ -605,5 +637,5 @@ def test_delete_project_cascades(isolated_state_db: Path) -> None:
     assert list_issues("t") == []
     assert recent_dispatches(project="t") == []
     assert list_unacked_notifications() == []
-    assert quota_today("t", day="2026-05-04") == 0
+    assert dispatches_in_window("t", 24) == 0
     assert list_deployments("t") == []
