@@ -345,8 +345,16 @@ def test_tick_dispatches_winner_and_updates_last_served(base_setup: Path) -> Non
 
 def test_tick_quota_exceeded_returns_reason(base_setup: Path) -> None:
     state.upsert_project(name="teach-me-eng-bot", path=str(base_setup), repo="me/x")
-    for _ in range(30):  # good.yaml's daily_dispatch_cap == 30
-        state.inc_quota("teach-me-eng-bot")
+    # good.yaml's dispatch_cap == 30 over a 5h rolling window
+    from datetime import datetime, timedelta, timezone
+    inside = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(
+        timespec="seconds"
+    )
+    for _ in range(30):
+        state.record_dispatch(
+            project="teach-me-eng-bot", issue=1, stage="plan-exec",
+            started_at=inside,
+        )
 
     gh_runner = FakeGhRunner(list_issues_payload=[_issue_payload(1)])
     res = _aiorun(_make_scheduler(gh_runner=gh_runner).tick())

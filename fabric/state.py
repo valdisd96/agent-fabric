@@ -17,7 +17,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fabric.registry import fabric_home
@@ -225,6 +225,14 @@ CREATE INDEX idx_deployments_project_status
 """
 
 
+# Rolling-window cap reads from `dispatches.started_at` directly, so the
+# separate counter table becomes dead weight. Drop it; data loss is fine
+# because the cap derives from dispatches itself.
+_SCHEMA_V7 = """
+DROP TABLE IF EXISTS quota_log;
+"""
+
+
 _MIGRATIONS: list[tuple[int, str]] = [
     (1, _SCHEMA_V1),
     (2, _SCHEMA_V2),
@@ -232,15 +240,12 @@ _MIGRATIONS: list[tuple[int, str]] = [
     (4, _SCHEMA_V4),
     (5, _SCHEMA_V5),
     (6, _SCHEMA_V6),
+    (7, _SCHEMA_V7),
 ]
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def _utc_today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 @contextmanager
@@ -722,32 +727,26 @@ def previous_successful_deployment(
 # ---- quota DAO ----
 
 
-def inc_quota(project: str, *, day: str | None = None) -> int:
-    """Bump dispatch count for (project, day-UTC). Returns new count."""
-    d = day or _utc_today()
+def dispatches_in_window(
+    project: str, hours: int, *, now: datetime | None = None
+) -> int:
+    """Count dispatches whose `started_at` falls within the last `hours`.
+
+    Rolling window — refills smoothly as old dispatches age past the cutoff,
+    no midnight cliff. Counts in-flight rows too (`ended_at` may be NULL),
+    which is correct: an in-flight dispatch is still consuming the API.
+    """
+    if hours <= 0:
+        raise StateError("hours must be positive")
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(hours=hours)
+    cutoff_iso = cutoff.isoformat(timespec="seconds")
     with connect() as conn:
-        conn.execute(
-            "INSERT INTO quota_log (project, day, dispatches) VALUES (?, ?, 1) "
-            "ON CONFLICT(project, day) DO UPDATE SET "
-            "  dispatches = quota_log.dispatches + 1",
-            (project, d),
-        )
         row = conn.execute(
-            "SELECT dispatches FROM quota_log WHERE project = ? AND day = ?",
-            (project, d),
+            "SELECT COUNT(*) FROM dispatches "
+            "WHERE project = ? AND started_at >= ?",
+            (project, cutoff_iso),
         ).fetchone()
-        conn.commit()
         return int(row[0])
-
-
-def quota_today(project: str, *, day: str | None = None) -> int:
-    d = day or _utc_today()
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT dispatches FROM quota_log WHERE project = ? AND day = ?",
-            (project, d),
-        ).fetchone()
-        return int(row[0]) if row else 0
 
 
 # ---- notifications DAO ----
@@ -831,12 +830,12 @@ __all__ = [
     "delete_project",
     "delete_setting",
     "dispatches_for_issue",
+    "dispatches_in_window",
     "find_notification_by_tg_message",
     "get_deployment",
     "get_issue",
     "get_project",
     "get_setting",
-    "inc_quota",
     "init_db",
     "latest_deployment",
     "latest_dispatch",
@@ -845,7 +844,6 @@ __all__ = [
     "list_projects",
     "list_unacked_notifications",
     "previous_successful_deployment",
-    "quota_today",
     "recent_dispatches",
     "record_deployment",
     "record_dispatch",

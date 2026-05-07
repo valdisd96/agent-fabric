@@ -18,19 +18,36 @@ def test_load_good_config() -> None:
     assert cfg.modules[0].path == "bot.py"
     assert cfg.labels.area_labels == ["bot", "vocab"]
     assert cfg.pipeline.cycle_limit == 5
+    assert cfg.pipeline.dispatch_cap == 30
+    assert cfg.pipeline.dispatch_window_hours == 5
     assert cfg.pipeline.downgrade_low_priority is False
-    assert cfg.fabric_version == "0.1.0"
+    assert cfg.fabric_version == "0.2.0"
 
 
 def test_downgrade_low_priority_can_be_enabled(tmp_path: Path) -> None:
     text = (FIXTURES / "good.yaml").read_text().replace(
-        "daily_dispatch_cap: 30",
-        "daily_dispatch_cap: 30\n  downgrade_low_priority: true",
+        "dispatch_cap: 30",
+        "dispatch_cap: 30\n  downgrade_low_priority: true",
     )
     p = tmp_path / "cfg.yaml"
     p.write_text(text)
     cfg = load_config(p)
     assert cfg.pipeline.downgrade_low_priority is True
+
+
+def test_legacy_daily_dispatch_cap_rejected(tmp_path: Path) -> None:
+    """0.2.0 dropped `daily_dispatch_cap`. A config still using it must fail
+    loudly so the operator updates to the rolling-window fields rather than
+    silently running with defaults."""
+    text = (FIXTURES / "good.yaml").read_text().replace(
+        "dispatch_cap: 30\n  dispatch_window_hours: 5",
+        "daily_dispatch_cap: 30",
+    )
+    p = tmp_path / "cfg.yaml"
+    p.write_text(text)
+    with pytest.raises(ConfigError) as exc:
+        load_config(p)
+    assert "daily_dispatch_cap" in str(exc.value)
 
 
 def test_missing_file_raises() -> None:

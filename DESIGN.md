@@ -228,7 +228,8 @@ pipeline:
   cycle_limit: 5
   retry_count: 3
   retry_backoff_seconds: [60, 300, 900]
-  daily_dispatch_cap: 30        # quota guard
+  dispatch_cap: 30              # rolling-window quota guard
+  dispatch_window_hours: 5      # tracks Anthropic's 5h rate-limit window
 
 fabric_version: "0.3.0"          # for sync drift detection
 ```
@@ -325,12 +326,8 @@ CREATE TABLE notifications (
   acknowledged_at TEXT
 );
 
-CREATE TABLE quota_log (
-  project TEXT NOT NULL,
-  day TEXT NOT NULL,          -- YYYY-MM-DD UTC
-  dispatches INTEGER DEFAULT 0,
-  PRIMARY KEY (project, day)
-);
+-- The rolling-window cap (Decision 10) reads from `dispatches.started_at`
+-- directly; no separate counter table. Migration v7 dropped `quota_log`.
 
 CREATE TABLE settings (
   key TEXT PRIMARY KEY,
@@ -456,9 +453,9 @@ Telegram auth: bot only responds to a single hardcoded `chat_id` (yours). Anyone
 
 ### Decision 10 — Quotas & throttling
 
-With 6–8 projects, Claude Pro/Max session quotas become a real constraint. The fabric tracks per-project dispatch counts in `quota_log` and:
+With 6–8 projects, Claude Pro/Max subscription rate limits become a real constraint. Anthropic enforces a 5-hour rolling window on Pro/Max plans, so the fabric mirrors that shape rather than a calendar-day cap (which would burn the whole budget early in the day and stall every project until UTC rollover).
 
-- **Per-project daily cap** — `pipeline.daily_dispatch_cap` in config. Default 30/day. Once hit, the project is skipped until UTC rollover; banner shown in dashboard; Telegram notification at 80%.
+- **Per-project rolling cap** — `pipeline.dispatch_cap` in config (default 30) over `pipeline.dispatch_window_hours` (default 5). The scheduler reads `COUNT(*) FROM dispatches WHERE project = ? AND started_at >= now - window` at dispatch time; once hit, the project is skipped until the oldest dispatch ages past the cutoff. No separate counter table — the dispatches log is the source of truth, so a fabric reinstall doesn't reset the counter mid-window.
 - **Global pause-on-quota-warning** — optional. If you've burned, say, 80% of weekly budget across all projects, fabric auto-pauses with a Telegram notice. (Manual estimate v1; no API to query Anthropic budget directly.)
 - **Sonnet downgrade** — config flag per project: `pipeline.downgrade_low_priority: true` makes `priority:low` issues dispatch with `--model claude-sonnet-4-6`. Off by default.
 

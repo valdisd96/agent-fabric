@@ -112,10 +112,16 @@ class Dispatcher:
         entry, config = self._load_project(project)
         await self._ensure_state_project(entry, config)
 
-        used = await asyncio.to_thread(state.quota_today, project)
-        if used >= config.pipeline.daily_dispatch_cap:
+        used = await asyncio.to_thread(
+            state.dispatches_in_window,
+            project,
+            config.pipeline.dispatch_window_hours,
+        )
+        if used >= config.pipeline.dispatch_cap:
             raise QuotaExceeded(
-                f"{project} hit daily cap ({used}/{config.pipeline.daily_dispatch_cap})"
+                f"{project} hit cap "
+                f"({used}/{config.pipeline.dispatch_cap} "
+                f"in last {config.pipeline.dispatch_window_hours}h)"
             )
 
         resolved_model = await self._resolve_model(project, issue, model, config)
@@ -155,10 +161,16 @@ class Dispatcher:
                 f"{deployment.project!r}, not {project!r}"
             )
 
-        used = await asyncio.to_thread(state.quota_today, project)
-        if used >= config.pipeline.daily_dispatch_cap:
+        used = await asyncio.to_thread(
+            state.dispatches_in_window,
+            project,
+            config.pipeline.dispatch_window_hours,
+        )
+        if used >= config.pipeline.dispatch_cap:
             raise QuotaExceeded(
-                f"{project} hit daily cap ({used}/{config.pipeline.daily_dispatch_cap})"
+                f"{project} hit cap "
+                f"({used}/{config.pipeline.dispatch_cap} "
+                f"in last {config.pipeline.dispatch_window_hours}h)"
             )
 
         # Force opus — diagnose is reasoning-heavy; never downgrade.
@@ -371,8 +383,6 @@ class Dispatcher:
             exit_code=exit_code,
             log_path=str(log_path),
         )
-        await asyncio.to_thread(state.inc_quota, entry.name)
-
         duration_s = (ended - started).total_seconds()
         # Bias toward log volume on failure: success at INFO, failure at
         # WARNING with the log path so journalctl alone tells the story.
@@ -540,8 +550,6 @@ class Dispatcher:
             exit_code=exit_code,
             log_path=str(log_path),
         )
-        await asyncio.to_thread(state.inc_quota, entry.name)
-
         duration_s = (ended - started).total_seconds()
         if exit_code == 0:
             log.info(
