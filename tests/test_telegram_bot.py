@@ -454,6 +454,45 @@ def test_handle_reply_flips_clarification_to_in_progress_for_non_epic(
     )
 
 
+def test_handle_reply_to_qualify_clarification_drops_label_only(
+    isolated_state_db: Path, app_setup: dict[str, Any], rest: httpx.AsyncClient
+) -> None:
+    """Triage-stage clarifications (qualify-issue Q&A) must not flip the
+    issue to `state:in-progress` — there's no plan-exec to resume. The
+    bot detects the `<!-- agent-qualify` marker in the embedded notif
+    body and only removes `state:clarification-needed`, leaving the
+    issue label-less so the next tick re-qualifies it.
+    """
+    state.upsert_project(name="teach-me-eng-bot", path="/p", repo="me/x")
+    state.upsert_issue(
+        project="teach-me-eng-bot", number=80,
+        state_label="state:clarification-needed",
+    )
+    notif = state.NotificationRow(
+        id=1, kind="clarification", project="teach-me-eng-bot", issue=80,
+        created_at="t", delivered_to=None, acknowledged_at=None,
+        body=(
+            "teach-me-eng-bot#80 — irregular verbs\n"
+            "state:unqualified → state:clarification-needed\n\n"
+            "<!-- agent-qualify v1 -->\n**Quick triage question…**"
+        ),
+    )
+    _aiorun(handle_reply_to_notification(rest, notif, "type the trio"))
+
+    edit_calls = [
+        c for c in app_setup["gh_runner"].calls if c[1:3] == ["issue", "edit"]
+    ]
+    # The clarification-needed label is removed.
+    assert any(
+        "--remove-label" in c and "state:clarification-needed" in c
+        for c in edit_calls
+    )
+    # No `state:in-progress` (or any other state label) is added —
+    # the issue must be label-less so qualify-issue re-runs.
+    flat = " ".join(arg for c in edit_calls for arg in c)
+    assert "--add-label" not in flat
+
+
 def test_handle_reply_flips_clarification_to_needs_decompose_for_epic(
     isolated_state_db: Path, app_setup: dict[str, Any], rest: httpx.AsyncClient
 ) -> None:

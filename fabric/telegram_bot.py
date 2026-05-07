@@ -252,17 +252,35 @@ _RESUME_FLIP_KINDS: frozenset[str] = frozenset(
     {"clarification", "decompose-approval"}
 )
 
+# Marker prefix written by `qualify-issue` on its clarification comment.
+# Distinguishes a triage-stage clarification (resume = re-qualify, i.e.
+# drop the label) from a clarify-issue / plan-exec clarification (resume
+# = `state:in-progress`). The scheduler embeds the latest agent-marker
+# comment into the notification body for `state:clarification-needed`
+# transitions, so checking `notif.body` here is sufficient.
+_AGENT_QUALIFY_MARKER = "<!-- agent-qualify"
 
-def _resume_state_for_reply(kind: str, type_label: str | None) -> str | None:
+
+def _resume_state_for_reply(
+    kind: str,
+    type_label: str | None,
+    notif_body: str | None = None,
+) -> str | None:
     """Decide which `state:*` to flip the issue to after a human reply.
     `decompose-approval` is always the epic-decompose loop. `clarification`
-    branches on `type:epic`: an epic-decompose Q&A resumes at
-    `state:needs-decompose`; a plan-exec / clarify-issue Q&A resumes at
-    `state:in-progress`. Returns None for kinds with no resume contract.
+    branches: a qualify-issue Q&A (detected via the agent-qualify marker
+    in the embedded comment body) returns None so the caller drops the
+    `state:clarification-needed` label without adding a new one — the
+    next tick re-qualifies. An epic Q&A resumes at `state:needs-decompose`;
+    a plan-exec / clarify-issue Q&A resumes at `state:in-progress`.
+    Returns None for kinds with no resume contract or for triage-stage
+    clarifications.
     """
     if kind == "decompose-approval":
         return "state:needs-decompose"
     if kind == "clarification":
+        if notif_body and _AGENT_QUALIFY_MARKER in notif_body:
+            return None
         return (
             "state:needs-decompose" if type_label == "type:epic"
             else "state:in-progress"
@@ -297,14 +315,20 @@ async def handle_reply_to_notification(
     except httpx.HTTPError:
         return True  # comment is the primary action; flip is best-effort
 
-    resume = _resume_state_for_reply(notif.kind, data.get("type_label"))
+    resume = _resume_state_for_reply(
+        notif.kind, data.get("type_label"), notif.body,
+    )
     cur = data.get("state_label")
-    if resume is None or resume == cur:
+    if resume == cur:
         return True
 
-    payload: dict[str, list[str]] = {"add": [resume]}
+    payload: dict[str, list[str]] = {}
+    if resume is not None:
+        payload["add"] = [resume]
     if cur:
         payload["remove"] = [cur]
+    if not payload:
+        return True
     try:
         await rest.post(
             f"/api/issues/{notif.project}/{notif.issue}/label", json=payload,
