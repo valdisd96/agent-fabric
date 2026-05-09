@@ -138,6 +138,7 @@ _NOTIF_HEADERS = {
     "decompose-approval": "📋 Decompose approval",
     "quota-warning": "⚠️ Quota warning",
     "issue-completed": "✅ Issue completed",
+    "issue-cancelled": "🚫 Issue cancelled",
     "state-changed": "🔄 State changed",
     "epic-advanced": "➡️ Epic advanced",
     "epic-completed": "🎉 Epic completed",

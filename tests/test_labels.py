@@ -72,6 +72,14 @@ def test_epic_flow_states_are_canonical() -> None:
     assert "state:epic" not in spec_names
 
 
+def test_state_cancelled_is_canonical() -> None:
+    """User-cancellation label — must be provisioned by `setup-labels` so
+    a user can apply it from the GitHub UI without first creating the
+    label by hand."""
+    spec_names = {s.name for s in STATE_LABELS}
+    assert "state:cancelled" in spec_names
+
+
 def test_type_epic_is_canonical_type_label() -> None:
     """`type:epic` is the permanent marker on a parent issue — separates
     'what kind of issue' from 'where in the pipeline' (state:*)."""

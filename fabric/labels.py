@@ -61,6 +61,11 @@ STATE_LABELS: list[LabelSpec] = [
         "b60205",
         "Cycle cap or repeated failure; human intervention required",
     ),
+    LabelSpec(
+        "state:cancelled",
+        "6e7681",
+        "User-cancelled — pipeline skips this issue (open or closed)",
+    ),
     LabelSpec("state:done", "0e8a16", "Closed; pipeline complete"),
 ]
 

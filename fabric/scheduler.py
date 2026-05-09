@@ -118,6 +118,21 @@ _ATTRIBUTION_WINDOW_SECONDS = 300
 _DONE_STATE_LABEL = "state:done"
 _COMPLETED_NOTIF_KIND = "issue-completed"
 
+# Cancellation. A closed issue is treated as cancelled (rather than
+# completed) when either (a) GitHub's stateReason is `NOT_PLANNED` — the
+# `gh issue close --reason "not planned"` and the web UI's "Close as not
+# planned" both set this — or (b) the issue carries `state:cancelled` at
+# close time. The label may also be applied to an OPEN issue: the
+# scheduler simply skips it (no `_STAGE_BY_STATE` mapping), which lets
+# users park a misfiled issue without closing it on GitHub.
+_CANCELLED_STATE_LABEL = "state:cancelled"
+_CANCELLED_NOTIF_KIND = "issue-cancelled"
+_NOT_PLANNED_REASON = "NOT_PLANNED"
+# Terminal states the completion-detector should never re-process.
+_TERMINAL_STATE_LABELS: frozenset[str] = frozenset(
+    {_DONE_STATE_LABEL, _CANCELLED_STATE_LABEL}
+)
+
 # Epic coordinator (B3 — hold-and-release).
 _EPIC_TYPE_LABEL = "type:epic"
 _DRAFT_STATE_LABEL = "state:draft"
@@ -570,16 +585,18 @@ class Scheduler:
         self, entry: ProjectEntry, observed_open: set[int]
     ) -> None:
         """Find tracked issues that vanished from the open list and confirm
-        closure via `gh.get_issue`. Mark them `state:done` and fire one
-        `issue-completed` notification each. Closed issues lose their
+        closure via `gh.get_issue`. Mark them terminal (`state:done` or
+        `state:cancelled`) and fire one `issue-completed` /
+        `issue-cancelled` notification each. Closed issues lose their
         `state:*` label, so this is the only place that detects pipeline
-        completion (PR-merge auto-close or manual close-as-completed).
+        completion (PR-merge auto-close, manual close-as-completed, or
+        manual close-as-not-planned).
         """
         tracked = await asyncio.to_thread(state.list_issues, entry.name)
         for row in tracked:
             if row.number in observed_open:
                 continue
-            if row.state_label in (None, _DONE_STATE_LABEL):
+            if row.state_label in (None, *_TERMINAL_STATE_LABELS):
                 continue
             try:
                 detail = await asyncio.to_thread(
@@ -589,11 +606,23 @@ class Scheduler:
                 continue
             if detail.state.upper() != "CLOSED":
                 continue
+            cancelled = (
+                detail.state_reason.upper() == _NOT_PLANNED_REASON
+                or any(
+                    lbl.name == _CANCELLED_STATE_LABEL for lbl in detail.labels
+                )
+            )
+            terminal_label = (
+                _CANCELLED_STATE_LABEL if cancelled else _DONE_STATE_LABEL
+            )
+            notif_kind = (
+                _CANCELLED_NOTIF_KIND if cancelled else _COMPLETED_NOTIF_KIND
+            )
             await asyncio.to_thread(
                 state.upsert_issue,
                 project=entry.name,
                 number=row.number,
-                state_label=_DONE_STATE_LABEL,
+                state_label=terminal_label,
                 type_label=row.type_label,
                 priority_label=row.priority_label,
                 area_label=row.area_label,
@@ -604,7 +633,7 @@ class Scheduler:
             )
             await asyncio.to_thread(
                 state.add_notification,
-                kind=_COMPLETED_NOTIF_KIND,
+                kind=notif_kind,
                 project=entry.name,
                 issue=row.number,
             )
