@@ -1,7 +1,7 @@
 ---
 name: epic-decompose
-description: Decomposition stage for `type:epic` issues at `state:needs-decompose`. Multi-round Socratic Q&A with the user (one round per dispatch), then proposes a child-issue list, awaits explicit approval (`/decompose-ok`), files children with `Refs #<parent>`, and parks the parent at `state:tracking`. Children are filed B3-style — child #1 at `state:needs-planning`, the rest at `state:draft` — so the fabric's coordinator can release them one at a time as each predecessor closes. Considers documentation impact during decomposition so the epic doesn't close with stale docs. Does NOT cut branches, write code, or open PRs.
-version: 2.1.0
+description: Decomposition stage for `type:epic` issues at `state:needs-decompose` (or `state:in-progress` on crash-resume). Multi-round Socratic Q&A with the user (one round per dispatch), then proposes a child-issue list, awaits explicit approval (`/decompose-ok`), files children with `Refs #<parent>`, and parks the parent at `state:tracking`. Children are filed B3-style — child #1 at `state:needs-planning`, the rest at `state:draft` — so the fabric's coordinator can release them one at a time as each predecessor closes. Considers documentation impact during decomposition so the epic doesn't close with stale docs. Does NOT cut branches, write code, or open PRs.
+version: 2.2.0
 ---
 
 # epic-decompose
@@ -22,7 +22,7 @@ You MUST NOT:
 
 ## Inputs and exit conditions
 
-Dispatched on a `type:epic` parent at `state:needs-decompose`. That's the entry state on the very first dispatch (set by `qualify-issue`) and also the resume state after the user answers a clarification or asks for proposal revisions.
+Dispatched on a `type:epic` parent at `state:needs-decompose`. That's the entry state on the very first dispatch (set by `qualify-issue`) and also the resume state after the user answers a clarification or asks for proposal revisions. Rarely you may also be re-invoked at `state:in-progress` — that means the previous dispatch crashed mid-stream after step 1 set the label but before any state-flipping exit. The decision tree below walks the comment history and reaches the same exit regardless of entry state, so no special handling is needed.
 
 Exits the run by flipping the state label to one of:
 - `state:clarification-needed` — you posted a question, awaiting answer.

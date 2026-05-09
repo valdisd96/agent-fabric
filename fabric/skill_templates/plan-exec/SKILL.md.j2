@@ -1,7 +1,7 @@
 ---
 name: plan-exec
-description: Stage 1 of the autonomous pipeline. Runs headless from scripts/agent-plan-exec.sh on a single GitHub issue that is unlabelled (fresh) or at state:needs-planning or state:needs-rework. Reads the issue + any prior PR review comments, decides whether user input is needed (invoke clarify-issue if so), then follows dev-flow to cut a branch, post a `<!-- agent-plan v1 -->` comment that pairs intent with a behavioural spec, implement the change, smoke-test, and commit. Does NOT push, does NOT open a PR — those are Stage 2 (test-writer). Hands off by flipping the label to state:tests-pending.
-version: 1.2.0
+description: Stage 1 of the autonomous pipeline. Runs headless from scripts/agent-plan-exec.sh on a single GitHub issue that is unlabelled (fresh), at state:needs-planning, state:needs-rework, or state:in-progress (resume). Reads the issue + any prior PR review comments, decides whether user input is needed (invoke clarify-issue if so), then follows dev-flow to cut a branch, post a `<!-- agent-plan v1 -->` comment that pairs intent with a behavioural spec, implement the change, smoke-test, and commit. Does NOT push, does NOT open a PR — those are Stage 2 (test-writer). Hands off by flipping the label to state:tests-pending.
+version: 1.3.0
 ---
 
 # plan-exec
@@ -44,8 +44,9 @@ The valid starting states are:
 - **unlabelled** — fresh issue, never picked up. Treat exactly like `state:needs-planning`. The runner script accepts this as the equivalent of "fresh".
 - `state:needs-planning` — explicitly labelled fresh.
 - `state:needs-rework` — coming back from a Stage-2 bounce or Stage-3 rejection.
+- `state:in-progress` — **resume**. The previous dispatch either parked for clarification (now answered — see the latest non-agent comment) or crashed mid-stream. Pick up where you stopped: do **not** restart from step 1, do **not** re-create a branch that already exists. Skip ahead — see "Resuming at `state:in-progress`" below.
 
-The runner script enforces these are the only inputs; double-check anyway. Flip to in-progress:
+Flip to in-progress (no-op if already there):
 
 ```bash
 gh issue edit <N> \
@@ -53,7 +54,14 @@ gh issue edit <N> \
   --add-label "state:in-progress"
 ```
 
-`gh` silently ignores `--remove-label` for labels not present, so the same command works whether the issue was unlabelled, `state:needs-planning`, or `state:needs-rework`.
+`gh` silently ignores `--remove-label` for labels not present, so the same command works whether the issue was unlabelled, `state:needs-planning`, `state:needs-rework`, or already `state:in-progress`.
+
+**Resuming at `state:in-progress`.** Read all issue comments first. Use the prior progress signals to decide what to skip:
+- `<!-- agent-plan v1 -->` present — your behavioural spec is already posted; do not re-post. Re-read it as your contract.
+- A `**Clarification needed before proceeding**` comment from clarify-issue, followed by a non-agent reply — the question has been answered. Treat the reply as additional spec.
+- A local branch matching `<type>/<topic>` already exists → check it out (`git checkout <branch>`) instead of cutting a new one. If the branch exists only on disk and not on the remote (clarify-issue parks before push), continue committing to it locally.
+
+If none of the above signals exist, the prior dispatch crashed before posting anything substantive. Treat as a fresh `state:needs-planning` cycle.
 
 ### 3. Decide: clarify or proceed?
 

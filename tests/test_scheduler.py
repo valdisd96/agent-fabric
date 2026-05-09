@@ -238,6 +238,56 @@ def test_tick_state_needs_decompose_dispatches_epic_decompose(base_setup: Path) 
     assert res.winner.stage == "epic-decompose"
 
 
+def test_tick_state_in_progress_non_epic_dispatches_plan_exec(
+    base_setup: Path,
+) -> None:
+    """`state:in-progress` is the resume target after a non-epic
+    clarification reply (and the marker plan-exec sets at step 2). The
+    scheduler must dispatch plan-exec on it so the issue doesn't park
+    silently — the bug PR #57 fixed for qualify-issue, here for
+    plan-exec / clarify-issue."""
+    gh_runner = FakeGhRunner(
+        list_issues_payload=[
+            _issue_payload(1, "state:in-progress", type_="type:feature"),
+        ]
+    )
+    res = _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+    assert res.winner is not None
+    assert res.winner.issue == 1
+    assert res.winner.stage == "plan-exec"
+
+
+def test_tick_state_in_progress_epic_dispatches_epic_decompose(
+    base_setup: Path,
+) -> None:
+    """A `type:epic` issue at `state:in-progress` (epic-decompose crashed
+    after step 1 set the label) must resume into `epic-decompose`, not
+    `plan-exec` — the latter would try to implement the unscoped epic."""
+    gh_runner = FakeGhRunner(
+        list_issues_payload=[
+            _issue_payload(1, "state:in-progress", type_="type:epic"),
+        ]
+    )
+    res = _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+    assert res.winner is not None
+    assert res.winner.stage == "epic-decompose"
+
+
+def test_tick_state_in_progress_no_type_defaults_to_plan_exec(
+    base_setup: Path,
+) -> None:
+    """If the issue carries no `type:*` label (qualify-issue should have
+    added one but didn't, or the label was hand-removed), default to
+    plan-exec rather than skipping — silent parking is what we're
+    fixing."""
+    gh_runner = FakeGhRunner(
+        list_issues_payload=[_issue_payload(1, "state:in-progress")]
+    )
+    res = _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+    assert res.winner is not None
+    assert res.winner.stage == "plan-exec"
+
+
 def test_tick_polls_and_upserts_issues(base_setup: Path) -> None:
     gh_runner = FakeGhRunner(
         list_issues_payload=[
