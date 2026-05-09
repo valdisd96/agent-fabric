@@ -39,9 +39,12 @@ _UNQUALIFIED_STATE = "state:unqualified"
 
 # Drain in-flight first → bring rework/tests back → start fresh planning.
 # Triage (unqualified, epic) sits below planning so it doesn't preempt
-# in-flight work.
+# in-flight work. `state:in-progress` shares the in-review tier because a
+# resume is in-flight work the human just unblocked, not a fresh planning
+# round.
 _STATE_TIER: dict[str, int] = {
     "state:in-review": 0,
+    "state:in-progress": 0,
     "state:needs-rework": 1,
     "state:tests-pending": 2,
     "state:needs-planning": 3,
@@ -57,6 +60,35 @@ _STAGE_BY_STATE: dict[str, str] = {
     "state:needs-decompose": "epic-decompose",
     _UNQUALIFIED_STATE: "qualify-issue",
 }
+
+# Resume routing for `state:in-progress`. The label is set by plan-exec /
+# epic-decompose at the start of work and is also the resume target the
+# Telegram bot writes after a non-epic clarification reply (see
+# telegram_bot._resume_state_for_reply). An issue parked here is either
+# (a) a clarification just unblocked, or (b) a prior dispatch crashed
+# mid-stream — both cases want the original stage to be re-invoked. Type
+# disambiguates: epics resume into epic-decompose, everything else into
+# plan-exec.
+_IN_PROGRESS_STATE = "state:in-progress"
+_IN_PROGRESS_TYPE_STAGE: dict[str, str] = {
+    "type:epic": "epic-decompose",
+}
+_IN_PROGRESS_DEFAULT_STAGE = "plan-exec"
+
+
+def _resolve_stage(state_label: str, type_label: str | None) -> str | None:
+    """Map (state, type) to the agent stage the scheduler should dispatch.
+    Returns None when the issue is in a non-actionable state (human gate,
+    terminal, or unrecognized label).
+    """
+    if state_label == _IN_PROGRESS_STATE:
+        if type_label is not None:
+            mapped = _IN_PROGRESS_TYPE_STAGE.get(type_label)
+            if mapped is not None:
+                return mapped
+        return _IN_PROGRESS_DEFAULT_STAGE
+    return _STAGE_BY_STATE.get(state_label)
+
 
 _PRIORITY_RANK: dict[str, int] = {
     "priority:high": 0,
@@ -157,6 +189,7 @@ class _Candidate:
     config: FabricConfig
     issue_number: int
     state_label: str
+    type_label: str | None
     priority_rank: int
     last_served_at: str
     created_at: str
@@ -282,7 +315,11 @@ class Scheduler:
 
         candidates.sort(key=self._sort_key)
         winner = candidates[0]
-        stage = _STAGE_BY_STATE[winner.state_label]
+        stage = _resolve_stage(winner.state_label, winner.type_label)
+        # `_poll_project` only enqueues candidates whose (state, type) maps
+        # to a real stage, so this is unreachable; mypy / future refactors
+        # need the assertion to keep the type narrow.
+        assert stage is not None
 
         try:
             result = await self._dispatcher.dispatch(
@@ -469,7 +506,7 @@ class Scheduler:
 
             if author not in config.project.trusted_authors:
                 continue
-            if state_label not in _STAGE_BY_STATE:
+            if _resolve_stage(state_label, type_label) is None:
                 continue
 
             issue_row = await asyncio.to_thread(state.get_issue, entry.name, issue.number)
@@ -518,6 +555,7 @@ class Scheduler:
                     config=config,
                     issue_number=issue.number,
                     state_label=state_label,
+                    type_label=type_label,
                     priority_rank=_PRIORITY_RANK.get(
                         priority_label or "", _DEFAULT_PRIORITY_RANK
                     ),
