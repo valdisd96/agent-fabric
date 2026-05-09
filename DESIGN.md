@@ -418,6 +418,7 @@ Push notifications for human-gate states + quick actions:
 | Dispatch failed (after retries) | `Retry` `Block` `Open` |
 | Daily quota at 80% | `Pause project X` `Open settings` |
 | Issue closed (PR merged or completed) | — (informational) |
+| Issue cancelled (closed-as-not-planned, or `state:cancelled` label at close) | — (informational, kind `issue-cancelled`) |
 | Any other observed `state:*` transition | — (informational, includes prev→new, cycle count, attribution) |
 
 Slash commands:
@@ -474,6 +475,8 @@ Scheduler checks all three each tick. Pause is graceful — in-flight dispatch f
 ### Decision 12 — Failure handling
 
 Inherited from orchestrator plan G2: 3 retries with backoff (60s, 5min, 15min), then park to `state:blocked` with a comment listing exit code + log path. Difference from the bash version: the comment is composed by the fabric (one place to update wording) and a Telegram notification fires at the park.
+
+User-driven counterpart: **`state:cancelled`**. Two equivalent ways to cancel an issue the fabric should leave alone — (a) add `state:cancelled` to an open issue (scheduler skips it; row stays in DB for audit), or (b) close it on GitHub with reason "not planned" (or with the label already set). The completion detector recognizes either and marks the row terminal with notification kind `issue-cancelled`. An accidentally-filed issue (e.g. a misfiring `deploy-diagnose`) is purged from the dispatch loop in one click — close-as-not-planned on GitHub.
 
 ### Decision 13 — Deployment
 

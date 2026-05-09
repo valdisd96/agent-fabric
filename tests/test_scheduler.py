@@ -553,6 +553,117 @@ def test_tick_does_not_renotify_already_done_issues(base_setup: Path) -> None:
     assert not any(c[1:3] == ["issue", "view"] for c in gh_runner.calls)
 
 
+def test_close_as_not_planned_marks_cancelled_not_done(
+    base_setup: Path,
+) -> None:
+    """`gh issue close --reason "not planned"` (or the web UI's "Close as
+    not planned") sets stateReason=NOT_PLANNED — that should land as
+    `state:cancelled` + `issue-cancelled` notif, not `state:done` +
+    `issue-completed`."""
+    state.upsert_project(
+        name="teach-me-eng-bot", path=str(base_setup),
+        repo="valdisd96/teach-me-eng-bot",
+    )
+    state.upsert_issue(
+        project="teach-me-eng-bot", number=12,
+        state_label="state:needs-planning", title="oops, accidental",
+        url="u", author="valdisd96", created_at="2026-05-01T10:00:00Z",
+    )
+    gh_runner = FakeGhRunner(
+        list_issues_payload=[],
+        issue_view_payload={
+            "number": 12, "title": "oops, accidental", "labels": [],
+            "author": {"login": "valdisd96"}, "url": "u",
+            "createdAt": "2026-05-01T10:00:00Z", "body": "",
+            "state": "CLOSED", "stateReason": "NOT_PLANNED", "comments": [],
+        },
+    )
+    _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+
+    notifs = state.list_unacked_notifications()
+    cancelled = [n for n in notifs if n.kind == "issue-cancelled"]
+    completed = [n for n in notifs if n.kind == "issue-completed"]
+    assert len(cancelled) == 1
+    assert cancelled[0].issue == 12
+    assert completed == []
+
+    row = state.get_issue("teach-me-eng-bot", 12)
+    assert row is not None
+    assert row.state_label == "state:cancelled"
+
+
+def test_close_with_cancelled_label_marks_cancelled(base_setup: Path) -> None:
+    """If the issue carries `state:cancelled` at close (regardless of
+    stateReason), that's treated as cancellation too — covers users who
+    flip the label first then close-as-completed."""
+    state.upsert_project(
+        name="teach-me-eng-bot", path=str(base_setup),
+        repo="valdisd96/teach-me-eng-bot",
+    )
+    state.upsert_issue(
+        project="teach-me-eng-bot", number=13,
+        state_label="state:in-review", title="t", url="u",
+        author="valdisd96", created_at="2026-05-01T10:00:00Z",
+    )
+    gh_runner = FakeGhRunner(
+        list_issues_payload=[],
+        issue_view_payload={
+            "number": 13, "title": "t",
+            "labels": [{"name": "state:cancelled"}],
+            "author": {"login": "valdisd96"}, "url": "u",
+            "createdAt": "2026-05-01T10:00:00Z", "body": "",
+            "state": "CLOSED", "stateReason": "COMPLETED", "comments": [],
+        },
+    )
+    _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+
+    notifs = state.list_unacked_notifications()
+    assert any(n.kind == "issue-cancelled" for n in notifs)
+    assert all(n.kind != "issue-completed" for n in notifs)
+    row = state.get_issue("teach-me-eng-bot", 13)
+    assert row is not None and row.state_label == "state:cancelled"
+
+
+def test_tick_does_not_renotify_already_cancelled_issues(
+    base_setup: Path,
+) -> None:
+    """A row already at `state:cancelled` is terminal — subsequent ticks
+    must not re-fetch it from gh nor re-fire the notification."""
+    state.upsert_project(
+        name="teach-me-eng-bot", path=str(base_setup),
+        repo="valdisd96/teach-me-eng-bot",
+    )
+    state.upsert_issue(
+        project="teach-me-eng-bot", number=14,
+        state_label="state:cancelled", title="t", url="u",
+        author="valdisd96", created_at="2026-04-01T10:00:00Z",
+    )
+    gh_runner = FakeGhRunner(list_issues_payload=[])
+    _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+
+    assert all(
+        n.kind != "issue-cancelled"
+        for n in state.list_unacked_notifications()
+    )
+    assert not any(c[1:3] == ["issue", "view"] for c in gh_runner.calls)
+
+
+def test_open_issue_with_cancelled_label_is_not_dispatched(
+    base_setup: Path,
+) -> None:
+    """`state:cancelled` on an OPEN issue must keep the scheduler from
+    dispatching it. Lets a user park a misfiled issue without closing it
+    on GitHub — the row stays in DB with the cancelled label."""
+    gh_runner = FakeGhRunner(
+        list_issues_payload=[_issue_payload(15, "state:cancelled")]
+    )
+    res = _aiorun(_make_scheduler(gh_runner=gh_runner).tick())
+
+    assert res.winner is None
+    row = state.get_issue("teach-me-eng-bot", 15)
+    assert row is not None and row.state_label == "state:cancelled"
+
+
 def test_tick_skips_notification_when_issue_still_open(
     base_setup: Path,
 ) -> None:

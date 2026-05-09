@@ -158,6 +158,30 @@ def test_get_issue_parses_full_detail() -> None:
     assert issue.comments[0].author and issue.comments[0].author.login == "b"
 
 
+def test_get_issue_requests_state_reason_field() -> None:
+    """Cancellation detection in scheduler reads `state_reason` to spot
+    `gh issue close --reason "not planned"` — if get_issue's --json
+    projection drops `stateReason`, the field is silently empty and
+    cancellations get mis-classified as completions."""
+    r = FakeRunner()
+    r.queue(stdout=json.dumps({"number": 1, "labels": [], "comments": []}))
+    get_issue("me/r", 1, runner=r)
+    json_arg_idx = r.calls[0].index("--json")
+    fields = r.calls[0][json_arg_idx + 1].split(",")
+    assert "stateReason" in fields
+
+
+def test_get_issue_parses_state_reason() -> None:
+    payload = {
+        "number": 1, "labels": [], "comments": [],
+        "state": "CLOSED", "stateReason": "NOT_PLANNED",
+    }
+    r = FakeRunner()
+    r.queue(stdout=json.dumps(payload))
+    issue = get_issue("me/r", 1, runner=r)
+    assert issue.state_reason == "NOT_PLANNED"
+
+
 # ---------- add_labels / remove_labels ----------
 
 

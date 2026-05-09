@@ -111,6 +111,7 @@ class IssueSummary(_GhModel):
 class IssueDetail(IssueSummary):
     body: str = ""
     state: str = ""
+    state_reason: str = ""
     comments: list[IssueComment] = []
 
 
@@ -172,7 +173,7 @@ def get_issue(
         "--repo",
         repo,
         "--json",
-        "number,title,body,labels,author,comments,url,createdAt,state",
+        "number,title,body,labels,author,comments,url,createdAt,state,stateReason",
     ]
     raw = _run_gh_json(args, runner=runner)
     try:
