@@ -75,12 +75,11 @@ def warn_if_systemd_env_diverges(
     doesn't, or sets it to a different value. Returns True iff a warning
     was emitted.
 
-    The bug this prevents: an operator runs `sudo -u fabric -H fabric
-    register …` outside the systemd unit's environment. Without
-    FABRIC_HOME, the CLI writes the registry to ~/.fabric/projects.yaml
-    while the running service reads $FABRIC_HOME/projects.yaml — the
-    project never appears in /api/projects and the scheduler polls
-    nothing."""
+    The bug this prevents: an operator runs `fabric register …` from a
+    shell that didn't source /etc/fabric/env. Without FABRIC_HOME, the
+    CLI writes the registry to ~/.fabric/projects.yaml while the running
+    service reads $FABRIC_HOME/projects.yaml — the project never appears
+    in /api/projects and the scheduler polls nothing."""
     env_map = os.environ if env is None else env
     declared = parse_env_file_fabric_home(env_file)
     if declared is None:
