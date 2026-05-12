@@ -486,8 +486,10 @@ internet for `gh` / `claude` / Telegram polling, and Phase 1 needs **no**
 inbound HTTP — the Telegram bot is long-poll. Phase 2's dashboard adds
 inbound, at which point a private ingress (VPC-internal LB or Tailscale
 exit-node) takes over. The unit is provisioned by `scripts/install-systemd.sh`
-(idempotent; creates the `fabric` system user, drops a 0600 `EnvironmentFile`,
-enables but does not auto-start the service).
+(idempotent; drops a 0600 `EnvironmentFile`, enables but does not auto-start
+the service). The service runs as `root` with `IS_SANDBOX=1` — intended for
+single-tenant VMs or isolated one-time containers, where there is nothing
+else on the host worth isolating the dispatcher from.
 
 ```ini
 [Unit]
@@ -497,16 +499,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=fabric
+User=root
 WorkingDirectory=/srv/agent-fabric
 EnvironmentFile=/etc/fabric/env
 ExecStart=/srv/agent-fabric/.venv/bin/fabric server
 Restart=always
 RestartSec=5
 ProtectSystem=full
-ProtectHome=true
 PrivateTmp=true
-NoNewPrivileges=true
 ReadWritePaths=/var/lib/fabric
 
 [Install]
@@ -514,6 +514,7 @@ WantedBy=multi-user.target
 ```
 
 `/etc/fabric/env` carries `FABRIC_HOME`, `FABRIC_HOST`, `FABRIC_PORT`,
+`IS_SANDBOX=1` (required when running `claude` as root),
 `FABRIC_TELEGRAM_TOKEN`, `FABRIC_TELEGRAM_CHAT_ID`. See SMOKE.md for the
 full bring-up walkthrough on a fresh VM.
 

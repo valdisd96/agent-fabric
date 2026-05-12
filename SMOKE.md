@@ -74,6 +74,7 @@ Edit `/etc/fabric/env`:
 FABRIC_HOME=/var/lib/fabric
 FABRIC_HOST=127.0.0.1
 FABRIC_PORT=7878
+IS_SANDBOX=1                          # baked in by installer; required for User=root
 FABRIC_TELEGRAM_TOKEN=<from BotFather>
 FABRIC_TELEGRAM_CHAT_ID=<your numeric chat_id>
 ```
@@ -86,16 +87,16 @@ sudo systemctl status fabric    # should be "active (running)"
 ## 5. Register your first project
 
 ```bash
-sudo -u fabric -i bash -lc '
-  cd /srv/projects
-  git clone https://github.com/valdisd96/teach-me-eng-bot
-  cp /srv/agent-fabric/examples/teach-me-eng-bot.config.yaml \
-     teach-me-eng-bot/.fabric/config.yaml
-  /srv/agent-fabric/.venv/bin/fabric register /srv/projects/teach-me-eng-bot
-  /srv/agent-fabric/.venv/bin/fabric setup-labels teach-me-eng-bot --check
-  /srv/agent-fabric/.venv/bin/fabric setup-labels teach-me-eng-bot
-  /srv/agent-fabric/.venv/bin/fabric sync teach-me-eng-bot
-'
+export FABRIC_HOME=/var/lib/fabric    # interactive shells don't auto-source /etc/fabric/env
+cd /srv/projects
+git clone https://github.com/valdisd96/teach-me-eng-bot
+cp /srv/agent-fabric/examples/teach-me-eng-bot.config.yaml \
+   teach-me-eng-bot/.fabric/config.yaml
+F=/srv/agent-fabric/.venv/bin/fabric
+"$F" register /srv/projects/teach-me-eng-bot
+"$F" setup-labels teach-me-eng-bot --check
+"$F" setup-labels teach-me-eng-bot
+"$F" sync teach-me-eng-bot
 ```
 
 ## 6. File a smoke issue
@@ -130,26 +131,20 @@ Expected progression:
 From the first real run on 2026-05-04 (full post-mortem in
 `docs/install-runs/2026-05-04.md`):
 
-- **`claude` binary under `$HOME` collides with `ProtectHome=true`.** The
-  official installer drops it at `~/.local/share/claude/versions/<v>` —
-  the systemd unit makes that path invisible to the service, so
-  `/usr/local/bin/claude → ~/.local/share/...` resolves to a forbidden
-  path. Relocate to `/usr/local/share/claude/claude-<v>` and re-symlink.
-  `install-systemd.sh` warns if it detects this case.
-- **`sudo -u fabric` does not load `/etc/fabric/env`.** Running
+- **Interactive shells don't auto-source `/etc/fabric/env`.** Running
   `fabric register` without `export FABRIC_HOME=/var/lib/fabric` writes
   the registry to `~/.fabric/projects.yaml` while the service reads
-  `/var/lib/fabric/projects.yaml`. The CLI now prints a stderr warning
-  when this divergence is detected; always set `FABRIC_HOME` in the
-  `sudo -u fabric` block (the install skill's heredoc does this).
+  `/var/lib/fabric/projects.yaml`. The CLI prints a stderr warning when
+  this divergence is detected; always export `FABRIC_HOME` before
+  invoking `fabric` from a fresh shell.
 - **Fine-grained PATs need `Contents: Read and write` per repo to push.**
   Read works (api + ls-remote) but `git push` fails with `denied to
   <user>` if the PAT doesn't grant write to the specific repo.
 - **TG bot `chat_id` is numeric, not `@username`.** Discover via
   [@userinfobot](https://t.me/userinfobot).
-- **`claude` refuses to run as root without `IS_SANDBOX=1`.** Only
-  relevant if you deviate from the canonical `User=fabric` setup
-  (e.g. for testing). Set `IS_SANDBOX=1` in `/etc/fabric/env` if so.
+- **The service runs as root with `IS_SANDBOX=1`.** Claude Code refuses
+  to start as root otherwise. The installer bakes `IS_SANDBOX=1` into
+  `/etc/fabric/env`; don't remove it.
 - **Per-dispatch logs land at `$FABRIC_HOME/logs/<project>/<n>/<stage>-<ts>.log`.**
   No rotation yet; cap is informal. If a project pumps out a lot of
   dispatches, rotate manually for now.
@@ -161,9 +156,9 @@ From the first real run on 2026-05-04 (full post-mortem in
 ssh vm "journalctl -u fabric -f"
 
 # Force-dispatch a specific stage (debug)
-sudo -u fabric /srv/agent-fabric/.venv/bin/fabric dispatch \
-    teach-me-eng-bot 42 plan-exec
+export FABRIC_HOME=/var/lib/fabric
+/srv/agent-fabric/.venv/bin/fabric dispatch teach-me-eng-bot 42 plan-exec
 
 # Pause the fabric without stopping the unit
-sudo -u fabric /srv/agent-fabric/.venv/bin/fabric pause --reason "demo"
+/srv/agent-fabric/.venv/bin/fabric pause --reason "demo"
 ```

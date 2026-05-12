@@ -1,7 +1,7 @@
 ---
 name: install
 description: Step-by-step procedure for installing agent-fabric on a fresh Ubuntu 24.04 LTS VPS and registering the first managed project. Invoke when the user asks to "install", "deploy", "set up", "provision", or "bring up" agent-fabric on a server, VM, or VPS — or asks how to run it next to a managed project like teach-me-eng-bot. Project-internal; not rendered into managed projects by `fabric sync`.
-version: 1.2.0
+version: 1.3.0
 ---
 
 # install
@@ -19,26 +19,35 @@ push back rather than improvising. If they're trying to run locally for
 development, point them at `CLAUDE.md` ("Working in this repo") instead —
 this skill is for the deployed service path.
 
+## Deployment model
+
+The service runs as **`root`** with `IS_SANDBOX=1`. This is intentional
+and intended for single-tenant VMs or isolated one-time containers —
+there is no separate `fabric` system user to switch to, no `sudo -u`
+dance for auth, and Claude Code reads its credentials from `/root/.claude`.
+If you need a hardened multi-tenant install with a dedicated service
+user, that's outside the scope of this runbook.
+
 ## What you'll end up with
 
 ```
-/srv/agent-fabric/          # checkout + .venv          (the operator's user)
-/srv/projects/<name>/       # cloned managed repos      (fabric:fabric, 0750)
-/var/lib/fabric/            # FABRIC_HOME (state.db, logs/)   (fabric:fabric)
-/etc/fabric/env             # systemd EnvironmentFile   (fabric:fabric, 0600)
+/srv/agent-fabric/          # checkout + .venv          (root:root)
+/srv/projects/<name>/       # cloned managed repos      (root:root, 0750)
+/var/lib/fabric/            # FABRIC_HOME (state.db, logs/)   (root:root, 0750)
+/etc/fabric/env             # systemd EnvironmentFile   (root:root, 0600)
 /etc/systemd/system/fabric.service
 ```
 
-One systemd unit (`fabric.service`) running as system user `fabric`,
-serving REST on `127.0.0.1:7878` and the Telegram bot inside the same
-process. Scheduler ticks every 60 s; one `claude -p` subprocess at a time
-across all projects (single-flight invariant — see DESIGN.md).
+One systemd unit (`fabric.service`) serving REST on `127.0.0.1:7878` and
+the Telegram bot inside the same process. Scheduler ticks every 60 s;
+one `claude -p` subprocess at a time across all projects (single-flight
+invariant — see DESIGN.md).
 
 ## Prerequisites — confirm before starting
 
 Before running anything, confirm with the user that they have:
 
-- A fresh Ubuntu 24.04 LTS VPS with sudo / root access.
+- A fresh Ubuntu 24.04 LTS VPS with root access (or sudo).
 - A GitHub Personal Access Token with `repo` scope (and `workflow` if any
   managed project's `safety.blocked_paths` permits `.github/workflows/`
   edits — teach-me-eng-bot blocks them, so `repo` alone is enough there).
@@ -52,11 +61,15 @@ Before running anything, confirm with the user that they have:
 If anything is missing, pause and ask — don't guess Telegram chat IDs or
 fabricate PATs.
 
+All commands below assume you're running as root (or prefixed with
+`sudo` if you ssh in as a non-root user). For brevity, the snippets
+elide `sudo`.
+
 ## Step 1 — system packages
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y python3.12 python3.12-venv git curl jq ca-certificates
+apt-get update
+apt-get install -y python3.12 python3.12-venv git curl jq ca-certificates
 ```
 
 Ubuntu 24.04 ships Python 3.12 in the default repos, which matches the
@@ -71,40 +84,41 @@ python3.12 --version       # e.g. Python 3.12.3
 
 ## Step 2 — install `gh` and `claude` CLIs
 
-`gh` (system-wide):
+**`gh`** — recommended path is the apt repository (system-wide, auto-updates
+via `apt upgrade`):
 
 ```bash
 curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-  | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-sudo chmod 0644 /usr/share/keyrings/githubcli-archive-keyring.gpg
+  | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+chmod 0644 /usr/share/keyrings/githubcli-archive-keyring.gpg
 echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-  | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-sudo apt-get update && sudo apt-get install -y gh
+  > /etc/apt/sources.list.d/github-cli.list
+apt-get update && apt-get install -y gh
 ```
 
-`claude` (Anthropic Claude Code CLI): follow
-https://docs.claude.com/en/docs/claude-code — Linux install instructions
-change occasionally, so re-read rather than caching a stale command.
-
-**Critical** — the official curl|sh installer drops the binary at
-`~/.local/share/claude/versions/<v>` (under `$HOME`). The systemd unit
-sets `ProtectHome=true`, which makes `/root/*` and `/home/*`
-**invisible** to the service. A naive `ln -s ~/.local/share/claude/...
-/usr/local/bin/claude` resolves to a hidden path and every dispatch
-fails at exec time with no useful log.
-
-Relocate the binary outside `$HOME` and symlink:
+**`claude`** — recommended path is Anthropic's apt repository (binary
+lands at a system path, no `$HOME` involvement):
 
 ```bash
-sudo install -d -m 0755 /usr/local/share/claude
-V=$(claude --version | awk '{print $1}')        # e.g. 2.1.126
-sudo cp "$(readlink -f "$(command -v claude)")" /usr/local/share/claude/claude-$V
-sudo chmod 0755 /usr/local/share/claude/claude-$V
-sudo ln -sfn /usr/local/share/claude/claude-$V /usr/local/bin/claude
+install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://downloads.claude.ai/keys/claude-code.asc \
+  -o /etc/apt/keyrings/claude-code.asc
+echo "deb [signed-by=/etc/apt/keyrings/claude-code.asc] https://downloads.claude.ai/claude-code/apt/stable stable main" \
+  > /etc/apt/sources.list.d/claude-code.list
+apt-get update && apt-get install -y claude-code
 ```
 
-`scripts/install-systemd.sh` warns if it detects `claude` resolving to
-`/root/*` or `/home/*`, so you'll catch this if you skip the relocation.
+Verify the Anthropic key fingerprint before trusting:
+
+```bash
+gpg --show-keys /etc/apt/keyrings/claude-code.asc
+# Must report: 31DD DE24 DDFA B679 F42D  7BD2 BAA9 29FF 1A7E CACE
+```
+
+The native curl|sh installer (`curl -fsSL https://claude.ai/install.sh
+| bash`) also works, but it drops the binary under `/root/.local/share/claude/`.
+That's fine for this root-mode install (the unit no longer enables
+`ProtectHome=true`), but apt is cleaner.
 
 Verify both:
 
@@ -116,7 +130,7 @@ claude --version
 ## Step 3 — check out and install agent-fabric
 
 ```bash
-sudo install -d -o "$USER" /srv/agent-fabric
+install -d -m 0755 /srv/agent-fabric
 git clone https://github.com/valdisd96/agent-fabric /srv/agent-fabric
 cd /srv/agent-fabric
 python3.12 -m venv .venv
@@ -131,51 +145,41 @@ If `pip install` errors with `Package requires a different Python:
 3.x is not in '>=3.12'`, the venv was created with the wrong interpreter
 — delete `.venv/` and re-run with `python3.12 -m venv` explicitly.
 
-## Step 4 — install the systemd unit (creates the `fabric` user)
+## Step 4 — install the systemd unit
 
 ```bash
-sudo bash /srv/agent-fabric/scripts/install-systemd.sh
+bash /srv/agent-fabric/scripts/install-systemd.sh
 ```
 
 The script is idempotent. It creates:
 
-- system user `fabric` with `$HOME=/var/lib/fabric`, shell `/usr/sbin/nologin`
-- `/srv/projects` (mode 0750, owned by `fabric`) — managed-repo clones land here
-- `/etc/fabric/env` with stub values, mode 0600, owned by `fabric`
-- `/etc/systemd/system/fabric.service` with the hardening flags
-  (`ProtectSystem=full`, `ProtectHome=true`, `PrivateTmp=true`,
-  `NoNewPrivileges=true`, `ReadWritePaths=$FABRIC_HOME`)
+- `/var/lib/fabric` (mode 0750, owned by `root`) — `FABRIC_HOME`
+- `/srv/projects` (mode 0750, owned by `root`) — managed-repo clones land here
+- `/etc/fabric/env` with stub values plus `IS_SANDBOX=1`, mode 0600, owned by `root`
+- `/etc/systemd/system/fabric.service` with `User=root`, plus
+  `ProtectSystem=full`, `PrivateTmp=true`, `ReadWritePaths=$FABRIC_HOME`
 
-It also prints a warning if `claude` resolves to a path under `$HOME`
-(see Step 2 caveat) — heed it before continuing, or every dispatch
-will silently fail under the running unit.
+It prints a warning if `claude` is not on `PATH`. The script does **not**
+auto-start the service — auth comes first.
 
-**Do not start the unit yet** — auth comes first, otherwise the service
-will boot and fail to dispatch because `gh`/`claude` aren't logged in.
+## Step 5 — authenticate `gh` and `claude`
 
-## Step 5 — authenticate `gh` and `claude` **as the `fabric` user**
-
-This is the most-missed gotcha. The service runs as `fabric`, so
-credentials must live in `/var/lib/fabric/.config/gh/` and
-`/var/lib/fabric/.claude/` — not in your sudo user's home.
-
-`nologin` does **not** block `sudo -u fabric -H bash -c '…'` — sudo
-invokes the requested binary directly, ignoring the user's login shell.
-No `usermod` flip is needed.
+The service runs as root, so credentials live in `/root/.config/gh/` and
+`/root/.claude/`. Just run the login commands directly:
 
 ```bash
-# gh — paste the PAT when prompted
-sudo -u fabric -H bash -c 'gh auth login --hostname github.com'
+# gh — paste the PAT when prompted; answer "Yes" to "Authenticate Git"
+gh auth login --hostname github.com
 
 # claude — interactive OAuth; see "Headless claude login" below if no browser
-sudo -u fabric -H bash -c 'claude login'
+claude login
 ```
 
 Verify:
 
 ```bash
-sudo -u fabric -H bash -c 'gh auth status'
-sudo -u fabric -H bash -c 'claude --version && ls -la ~/.claude'
+gh auth status
+claude --version && ls -la /root/.claude
 ```
 
 ### Headless `claude login` (no browser on the VPS)
@@ -198,7 +202,7 @@ every dispatch will fail.
 ## Step 6 — fill `/etc/fabric/env`
 
 ```bash
-sudo -e /etc/fabric/env       # opens with sudo's default editor
+EDITOR=vi visudo -f /etc/fabric/env   # or just: nano /etc/fabric/env
 ```
 
 Set the Telegram pair (omit both for REST-only mode):
@@ -207,34 +211,32 @@ Set the Telegram pair (omit both for REST-only mode):
 FABRIC_HOME=/var/lib/fabric
 FABRIC_HOST=127.0.0.1
 FABRIC_PORT=7878
+IS_SANDBOX=1                                          # baked in by installer
 FABRIC_TELEGRAM_TOKEN=<from BotFather, looks like 1234567890:AA…>
 FABRIC_TELEGRAM_CHAT_ID=<numeric, from @userinfobot>
 
 # Optional:
 # FABRIC_LOG_LEVEL=INFO              # DEBUG for ad-hoc troubleshooting
-# IS_SANDBOX=1                       # only if you deviate from User=fabric
-                                     # and run the unit as root — `claude`
-                                     # refuses to run as root otherwise
 ```
 
-File must end up `fabric:fabric, 0600`. If the editor changed ownership:
+File must end up `root:root, 0600`. If the editor changed mode:
 
 ```bash
-sudo chown fabric:fabric /etc/fabric/env && sudo chmod 0600 /etc/fabric/env
+chown root:root /etc/fabric/env && chmod 0600 /etc/fabric/env
 ```
 
 ## Step 7 — start the service
 
 ```bash
-sudo systemctl start fabric
-sudo systemctl status fabric --no-pager     # expect: active (running)
-sudo journalctl -u fabric -f                # tick loop should log within 60s
+systemctl start fabric
+systemctl status fabric --no-pager     # expect: active (running)
+journalctl -u fabric -f                # tick loop should log within 60s
 ```
 
 If `status` shows `failed`, dump the last 50 lines and inspect:
 
 ```bash
-sudo journalctl -u fabric -n 50 --no-pager
+journalctl -u fabric -n 50 --no-pager
 ```
 
 Common first-boot failures:
@@ -242,16 +244,16 @@ Common first-boot failures:
 | Log signature | Cause | Fix |
 |---|---|---|
 | `ModuleNotFoundError: fabric` | venv at wrong path | confirm `/srv/agent-fabric/.venv/bin/fabric` exists |
-| `gh: command not found` (in dispatch logs) | `gh` not on `fabric`'s `$PATH` | `sudo ln -s "$(command -v gh)" /usr/local/bin/gh` |
-| `OperationalError: unable to open database file` | `$FABRIC_HOME` permissions wrong | `sudo chown -R fabric:fabric /var/lib/fabric` |
+| `gh: command not found` (in dispatch logs) | `gh` not on root's `$PATH` | `ln -s "$(command -v gh)" /usr/local/bin/gh` |
+| `Claude Code may not be run as root … set IS_SANDBOX=1` | env file missing `IS_SANDBOX=1` | add it, `systemctl restart fabric` |
+| `OperationalError: unable to open database file` | `$FABRIC_HOME` missing/unwritable | `install -d -o root -g root -m 0750 /var/lib/fabric` |
 | `telegram error: Unauthorized` | bad bot token | re-check `FABRIC_TELEGRAM_TOKEN`, restart |
 | One-line warning about TG creds, then REST-only | both TG vars unset | expected; fill them and `systemctl restart fabric` |
 
 ## Step 8 — register the first managed project
 
-`/srv/projects` was created by `install-systemd.sh` (Step 4) — fabric
-owned, mode 0750. Clone, configure, register, label, and sync as
-`fabric`.
+`/srv/projects` was created by `install-systemd.sh` (Step 4). Clone,
+configure, register, label, and sync — all as root.
 
 The block below is shaped for **teach-me-eng-bot** specifically — it
 copies the worked-example config from `examples/`. For any other project
@@ -259,16 +261,13 @@ you need an authored `.fabric/config.yaml` first; see the
 `register-project` skill for the end-to-end "design a config from
 scratch + register" walkthrough.
 
-**Critical:** `sudo -u` does *not* load `/etc/fabric/env`, so `FABRIC_HOME`
-is unset by default and the CLI falls back to `~/.fabric/projects.yaml`
-— a path the systemd service does not read. Export it explicitly inside
-every `sudo -u fabric` block. As of fabric 0.2.x, `fabric` itself emits
-a stderr warning when this divergence is detected, so you'll notice
-quickly if the export is missed.
+**Critical:** an interactive shell does *not* automatically source
+`/etc/fabric/env`. Without `FABRIC_HOME`, the CLI writes the registry to
+`~/.fabric/projects.yaml` — a path the systemd service does not read.
+Export it explicitly. As of fabric 0.2.x the CLI emits a stderr warning
+when this divergence is detected, so you'll notice quickly if you forget.
 
 ```bash
-sudo -u fabric -H bash <<'EOF'
-set -euo pipefail
 export FABRIC_HOME=/var/lib/fabric        # ← MUST match /etc/fabric/env
 cd /srv/projects
 git clone https://github.com/<owner>/<repo>
@@ -285,7 +284,6 @@ FABRIC=/srv/agent-fabric/.venv/bin/fabric
 "$FABRIC" setup-labels <project-name> --check     # diff against repo
 "$FABRIC" setup-labels <project-name>             # apply
 "$FABRIC" sync <project-name>                     # renders 7 skill templates into .claude/skills/
-EOF
 ```
 
 Substitute `<owner>/<repo>` and `<project-name>` (the `project.name` from
@@ -293,7 +291,7 @@ Substitute `<owner>/<repo>` and `<project-name>` (the `project.name` from
 in the project working tree — guide the user to commit them upstream:
 
 ```bash
-sudo -u fabric -H bash -c 'cd /srv/projects/<repo> && git status'
+cd /srv/projects/<repo> && git status
 ```
 
 The user creates the commit + PR from their own clone, not the VPS — the
@@ -312,8 +310,8 @@ Have the user open an issue in the managed repo with these labels:
 Then watch progression in three windows:
 
 ```bash
-sudo journalctl -u fabric -f
-sudo -u fabric /srv/agent-fabric/.venv/bin/fabric logs <project> <issue#> --follow
+journalctl -u fabric -f
+/srv/agent-fabric/.venv/bin/fabric logs <project> <issue#> --follow
 # Telegram: /queue and /status
 ```
 
@@ -331,14 +329,14 @@ state:tests-pending   →  state:in-review       (test-writer runs, PR opens)
 
 ```bash
 # Service control
-sudo systemctl restart fabric
-sudo systemctl stop fabric
-sudo systemctl status fabric --no-pager
+systemctl restart fabric
+systemctl stop fabric
+systemctl status fabric --no-pager
 
 # Logs
-sudo journalctl -u fabric -f                       # service stdout/stderr
-sudo ls /var/lib/fabric/logs/                      # per-dispatch claude -p logs
-sudo -u fabric /srv/agent-fabric/.venv/bin/fabric logs <project> <n> --follow
+journalctl -u fabric -f                            # service stdout/stderr
+ls /var/lib/fabric/logs/                           # per-dispatch claude -p logs
+/srv/agent-fabric/.venv/bin/fabric logs <project> <n> --follow
 
 # REST surface (all behind /api/* except liveness; OpenAPI at /docs)
 curl -sS http://127.0.0.1:7878/healthz             # {"ok": true}
@@ -349,26 +347,28 @@ curl -sS http://127.0.0.1:7878/api/dispatches      # recent dispatches
 curl -sS http://127.0.0.1:7878/docs                # interactive OpenAPI UI
 
 # State (read-only is safe while running)
-sudo -u fabric sqlite3 -readonly /var/lib/fabric/state.db '.tables'
+sqlite3 -readonly /var/lib/fabric/state.db '.tables'
 
-# CLI escape hatches (always as fabric)
+# CLI escape hatches — always export FABRIC_HOME first
+export FABRIC_HOME=/var/lib/fabric
 F=/srv/agent-fabric/.venv/bin/fabric
-sudo -u fabric "$F" pause --reason "demo"
-sudo -u fabric "$F" resume
-sudo -u fabric "$F" dispatch <project> <issue#> plan-exec
-sudo -u fabric "$F" sync <project> --check         # drift check
+"$F" pause --reason "demo"
+"$F" resume
+"$F" dispatch <project> <issue#> plan-exec
+"$F" sync <project> --check         # drift check
 ```
 
 ## Upgrading
 
 ```bash
 cd /srv/agent-fabric
-sudo -u fabric git pull --ff-only
-sudo /srv/agent-fabric/.venv/bin/pip install -e .
-sudo systemctl restart fabric
+git pull --ff-only
+/srv/agent-fabric/.venv/bin/pip install -e .
+systemctl restart fabric
 
 # Re-render skills if templates moved (per managed project)
-sudo -u fabric /srv/agent-fabric/.venv/bin/fabric sync <project>
+export FABRIC_HOME=/var/lib/fabric
+/srv/agent-fabric/.venv/bin/fabric sync <project>
 ```
 
 If a template's `fabric_version` bumped major and a managed project's
@@ -381,9 +381,9 @@ Before declaring the install complete, verify all of:
 
 - [ ] `systemctl is-active fabric` → `active`
 - [ ] `journalctl -u fabric --since "1 minute ago"` shows scheduler tick
-- [ ] `sudo -u fabric gh auth status` → logged in
-- [ ] `sudo -u fabric claude --version` → no auth errors
-- [ ] At least one project shows up in `fabric list` (run as fabric)
+- [ ] `gh auth status` → logged in
+- [ ] `claude --version` → no auth errors
+- [ ] At least one project shows up in `fabric list`
 - [ ] `setup-labels <project> --check` → "labels are clean"
 - [ ] `sync <project> --check` → exit 0
 - [ ] Telegram `/status` responds (if TG configured)

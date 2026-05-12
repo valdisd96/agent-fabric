@@ -20,7 +20,7 @@ install first (through the hand-off checklist), then come back here.
 ## What you'll end up with
 
 ```
-/srv/projects/<repo>/                          # cloned managed repo (fabric:fabric)
+/srv/projects/<repo>/                          # cloned managed repo (root:root)
 /srv/projects/<repo>/.fabric/config.yaml       # ← the file you author in Step 2
 /srv/projects/<repo>/.claude/skills/{plan-exec,test-writer,review-pr,
                                      clarify-issue,epic-decompose,
@@ -37,10 +37,10 @@ The fabric's next 60-second tick will pick up any pre-existing
 - The fabric service is running (`systemctl is-active fabric` → `active`)
   and at least one project (e.g. teach-me-eng-bot) is already healthy.
 - The new repo exists on GitHub and the fabric's `gh` auth (logged in
-  as the `fabric` system user) has **read + write** access to it. For
-  fine-grained PATs that means `Contents: Read and write` granted to
-  the specific repo — read-only is enough to register but `git push`
-  fails when the dispatcher tries to open a PR.
+  as `root`) has **read + write** access to it. For fine-grained PATs
+  that means `Contents: Read and write` granted to the specific repo —
+  read-only is enough to register but `git push` fails when the
+  dispatcher tries to open a PR.
 - You know what trivial first issue you'll file as a smoke test
   (Step 9) — a one-line README/docs change is ideal.
 - The repo has at least one committed file on `main` (the dispatcher
@@ -154,13 +154,12 @@ refactors, ill-specified issues); lower it (3) for projects where
 runaway looping is more concerning than under-progress.
 
 **Picking `fabric_version`.** Read the running fabric's version:
-`sudo -u fabric /srv/agent-fabric/.venv/bin/fabric --version` — wait,
-`fabric` doesn't have `--version` yet. Use `pip show agent-fabric` from
-inside the venv, or `grep ^version /srv/agent-fabric/pyproject.toml`.
+`fabric` doesn't have `--version` yet, so use `pip show agent-fabric`
+from inside the venv, or `grep ^version /srv/agent-fabric/pyproject.toml`.
 Pin to that exact value. If the running fabric is `0.2.x`, both
 `"0.2.0"` and `"0.2.5"` work; `"0.3.0"` would be future-incompatible.
 
-## Step 3 — clone the repo under `/srv/projects` as the fabric user
+## Step 3 — clone the repo under `/srv/projects`
 
 The path must be `/srv/projects/<repo>` because that's where
 `install-systemd.sh` set up the writable directory and where the
@@ -169,36 +168,29 @@ the GitHub repo name, not necessarily `project.name` (they often
 match anyway).
 
 ```bash
-sudo -u fabric -H bash <<'EOF'
-set -euo pipefail
 export FABRIC_HOME=/var/lib/fabric        # ← MUST match /etc/fabric/env
 cd /srv/projects
 git clone https://github.com/<owner>/<repo>
-EOF
 ```
 
-If `git clone` errors on auth, the fabric's `gh` PAT doesn't have read
-access to this repo. Re-grant via `sudo -u fabric -H gh auth refresh
--h github.com -s repo` or rotate the PAT.
+If `git clone` errors on auth, the `gh` PAT doesn't have read access to
+this repo. Re-grant via `gh auth refresh -h github.com -s repo` or
+rotate the PAT.
 
 ## Step 4 — drop the authored config into the clone
 
 Author the YAML on your laptop (or anywhere convenient), copy it to
 the VPS, then place it under `.fabric/config.yaml` in the new clone.
-The file must be readable by `fabric:fabric`.
 
 ```bash
 # From your laptop:
 scp my-new-bot.config.yaml vps:/tmp/
 
-# On the VPS:
-sudo -u fabric -H bash <<'EOF'
-set -euo pipefail
+# On the VPS (as root):
 export FABRIC_HOME=/var/lib/fabric
 PROJECT=/srv/projects/<repo>
 mkdir -p "$PROJECT/.fabric"
 cp /tmp/my-new-bot.config.yaml "$PROJECT/.fabric/config.yaml"
-EOF
 ```
 
 Don't put the YAML in an `examples/` subdirectory of agent-fabric — it
@@ -209,8 +201,6 @@ authoritative source.
 ## Step 5 — register, provision labels, sync
 
 ```bash
-sudo -u fabric -H bash <<'EOF'
-set -euo pipefail
 export FABRIC_HOME=/var/lib/fabric
 PROJECT=/srv/projects/<repo>
 NAME=<project-name>                         # the project.name from your YAML
@@ -222,7 +212,6 @@ F=/srv/agent-fabric/.venv/bin/fabric
                                             # type:*, area:* labels in the GH repo
 "$F" sync "$NAME"                           # renders the 7 skills into
                                             # $PROJECT/.claude/skills/
-EOF
 ```
 
 What can fail and how to read it:
@@ -267,17 +256,15 @@ gh pr create --base main --title "chore: wire agent-fabric" \
 After the PR merges, on the VPS:
 
 ```bash
-sudo -u fabric -H bash -c '
-  cd /srv/projects/<repo> && git fetch && git reset --hard origin/main
-'
+cd /srv/projects/<repo> && git fetch && git reset --hard origin/main
 ```
 
 The VPS clone now matches what the dispatcher will rebase onto.
 
 **Pragmatic — commit + push directly from the VPS clone.** Works if
-the `fabric` user's `gh` PAT has write access; just be aware the VPS
-clone *is* the dispatcher's working copy, so don't leave dirty trees
-or partial branches behind.
+the host's `gh` PAT has write access; just be aware the VPS clone *is*
+the dispatcher's working copy, so don't leave dirty trees or partial
+branches behind.
 
 ## Step 7 — drop in the drift-CI workflow (recommended)
 
@@ -325,8 +312,8 @@ Open a trivial issue in the new repo:
 Then watch progression in three places, same as the install smoke:
 
 ```bash
-sudo journalctl -u fabric -f
-sudo -u fabric /srv/agent-fabric/.venv/bin/fabric logs <project> <issue#> --follow
+journalctl -u fabric -f
+/srv/agent-fabric/.venv/bin/fabric logs <project> <issue#> --follow
 # Telegram: /queue, /status
 ```
 
@@ -341,8 +328,8 @@ state:needs-planning → state:in-progress → state:tests-pending → state:in-
 
 If the issue sits at `state:needs-planning` for >2 minutes:
 
-- Confirm it appears in `fabric status` (run as fabric, with
-  `FABRIC_HOME` exported). If not, the registry didn't take.
+- Confirm it appears in `fabric status` (export `FABRIC_HOME` first).
+  If not, the registry didn't take.
 - Confirm none of the other paused gates are set: `fabric status`
   also shows the global `paused` flag.
 - Tail `journalctl -u fabric` for "no actionable issues" — the

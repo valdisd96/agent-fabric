@@ -50,7 +50,7 @@ examples/
 └── github-actions/fabric-sync-check.yml # drift CI workflow projects copy into .github/workflows/
 
 scripts/
-└── install-systemd.sh                   # idempotent VPC VM installer — fabric system user, systemd unit, EnvironmentFile
+└── install-systemd.sh                   # idempotent VPC VM installer — systemd unit (User=root, IS_SANDBOX=1), EnvironmentFile
 
 tests/
 ├── conftest.py        # shared fixtures (fabric_root, isolated_fabric_home, project, isolated_state_db)
